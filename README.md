@@ -2,9 +2,9 @@
 
 ## Introduction
 
-This repo is for the arxiv paper Understanding Multimodal LLMs: the Mechanistic Interpretability of Llava in Visual Question Answering 
+This repo is for the arxiv paper: Understanding Multimodal LLMs: the Mechanistic Interpretability of Llava in Visual Question Answering 
 
-This work explores the mechanism of Llava in visual question answering. 
+This work explores the mechanism of Llava in visual question answering. The overall mechanism is an ICL mechanism similar to TextualQA. 
 
 This work uses the findings and insights in [this repo](https://github.com/zepingyu0512/neuron-attribution/tree/main) in [this EMNLP 2024 paper](https://zepingyu0512.github.io/neuron-attribution.github.io/), and [this repo](https://github.com/zepingyu0512/in-context-mechanism) in [this EMNLP 2024 paper](https://zepingyu0512.github.io/in-context-mechanism.github.io/)
 
