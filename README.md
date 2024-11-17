@@ -12,6 +12,8 @@ This work uses the techniques and insights in:
 
 [EMNLP 2024: How do Large Language Models Learn In-Context? Query and Key Matrices of In-Context Heads are Two Towers for Metric Learning](https://zepingyu0512.github.io/in-context-mechanism.github.io/)
 
+[EMNLP 2024: Interpreting Arithmetic Mechanism in Large Language Models through Comparative Neuron Analysis](https://zepingyu0512.github.io/arithmetic-mechanism.github.io/)
+
 ## Running code
 
 You can directly have a look at Llava_visualize_code.ipynb without running the code.
