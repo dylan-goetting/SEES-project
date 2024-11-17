@@ -6,17 +6,23 @@ This repo is for the arxiv paper: Understanding Multimodal LLMs: the Mechanistic
 
 This work explores the mechanism of Llava in visual question answering. The overall mechanism is an ICL mechanism similar to TextualQA. 
 
-This work uses the findings and insights in [this repo](https://github.com/zepingyu0512/neuron-attribution/tree/main) in [this EMNLP 2024 paper](https://zepingyu0512.github.io/neuron-attribution.github.io/), and [this repo](https://github.com/zepingyu0512/in-context-mechanism) in [this EMNLP 2024 paper](https://zepingyu0512.github.io/in-context-mechanism.github.io/)
+This work uses the findings and insights in:
+
+[EMNLP 2024: Neuron-Level Knowledge Attribution in Large Language Models](https://zepingyu0512.github.io/neuron-attribution.github.io/), and [this repo](https://github.com/zepingyu0512/in-context-mechanism) 
+
+[EMNLP 2024: How do Large Language Models Learn In-Context? Query and Key Matrices of In-Context Heads are Two Towers for Metric Learning](https://zepingyu0512.github.io/in-context-mechanism.github.io/)
 
 ## Running code
 
-You can directly have a look at Llava_visualize.ipynb without running the code.
+You can directly have a look at Llava_visualize_code.ipynb without running the code.
 
 Environment versions: please see **environment.yml**
 
 First, please use modeling_llava.py to replace the original file in the transformers path, which is usually in anaconda3/envs/YOUR_ENV_NAME/lib/python3.8/site-packages/transformers/models/llava. This modified file is useful for extracting the internal vectors during inference time. **Please remember to save the original file.** 
 
-Then run Llava_visualize.ipynb to analyze the important image patches for the generations in Llava.
+Then run Llava_visualize_code.ipynb to visualize the important image patches for the generations in Llava.
+
+You can also use Llava_visualize_Gradio.ipynb to visualize the images case-by-case in an interactive tool using Gradio.
 
 ## cite us: 
 
