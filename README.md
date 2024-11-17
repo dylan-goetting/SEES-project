@@ -8,7 +8,7 @@ This work explores the mechanism of Llava in visual question answering. The over
 
 This work uses the findings and insights in:
 
-[EMNLP 2024: Neuron-Level Knowledge Attribution in Large Language Models](https://zepingyu0512.github.io/neuron-attribution.github.io/), and [this repo](https://github.com/zepingyu0512/in-context-mechanism) 
+[EMNLP 2024: Neuron-Level Knowledge Attribution in Large Language Models](https://zepingyu0512.github.io/neuron-attribution.github.io/)
 
 [EMNLP 2024: How do Large Language Models Learn In-Context? Query and Key Matrices of In-Context Heads are Two Towers for Metric Learning](https://zepingyu0512.github.io/in-context-mechanism.github.io/)
 
