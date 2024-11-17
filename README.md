@@ -24,7 +24,7 @@ First, please use modeling_llava.py to replace the original file in the transfor
 
 Then run Llava_visualize_code.ipynb to visualize the important image patches for the generations in Llava.
 
-You can also use Llava_visualize_Gradio.ipynb to visualize the images case-by-case in an interactive tool using Gradio.
+You can also use Llava_visualize_Gradio.ipynb to visualize the images case-by-case in an interactive tool using Gradio. Please use similar patterns to fit Llava: USER: <image>\nWhat is the color of the dog?\nASSISTANT: The color of the dog is
 
 ## cite us: 
 
