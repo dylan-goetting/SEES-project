@@ -6,7 +6,7 @@ This repo is for the arxiv paper: Understanding Multimodal LLMs: the Mechanistic
 
 This work explores the mechanism of Llava in visual question answering. The overall mechanism is an ICL mechanism similar to TextualQA. 
 
-This work uses the findings and insights in:
+This work uses the techniques and insights in:
 
 [EMNLP 2024: Neuron-Level Knowledge Attribution in Large Language Models](https://zepingyu0512.github.io/neuron-attribution.github.io/)
 
