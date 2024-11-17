@@ -16,7 +16,7 @@ This work uses the techniques and insights in:
 
 ## Running code
 
-You can directly have a look at the example in Llava_visualize_code.ipynb without running the code.
+You can have a look at the example in Llava_visualize_code.ipynb without running the code.
 
 Environment versions: please see **environment.yml**
 
