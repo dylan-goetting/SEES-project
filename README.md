@@ -28,13 +28,5 @@ You can also use Llava_visualize_Gradio.ipynb to visualize the images case-by-ca
 
 ## cite us: 
 
-```
-@article{yu2024understanding,
-  title={Understanding Multimodal LLMs: the Mechanistic Interpretability of Llava in Visual Question Answering},
-  author={Yu, Zeping and Ananiadou, Sophia},
-  journal={arXiv preprint arXiv},
-  year={2024}
-}
-```
-
+wait for the arxiv file
 
