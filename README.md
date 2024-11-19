@@ -2,7 +2,7 @@
 
 ## Introduction
 
-This repo is for the arxiv paper: Understanding Multimodal LLMs: the Mechanistic Interpretability of Llava in Visual Question Answering 
+This repo is for the arxiv paper: [Understanding Multimodal LLMs: the Mechanistic Interpretability of Llava in Visual Question Answering](https://arxiv.org/pdf/2411.10950) 
 
 This work explores the mechanism of Llava in visual question answering. The overall mechanism is an ICL mechanism similar to TextualQA. 
 
