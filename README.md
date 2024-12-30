@@ -22,9 +22,9 @@ Environment versions: please see **environment.yml**
 
 First, please use modeling_llava.py and modeling_llama.py to replace the original file in the transformers path, which is usually in anaconda3/envs/YOUR_ENV_NAME/lib/python3.8/site-packages/transformers/models/llava and anaconda3/envs/YOUR_ENV_NAME/lib/python3.8/site-packages/transformers/models/llama. These modified files are useful for extracting the internal vectors during inference time. **Please remember to save the original file.** 
 
-Then run Llava_visualize_code.ipynb to visualize the important image patches for the generations in Llava.
+Then run Llava_visualize_code.ipynb to visualize the important image patches for the generations in Llava. Please use similar patterns to fit Llava: USER: <image>\nWhat is the color of the dog?\nASSISTANT: The color of the dog is
 
-Please use similar patterns to fit Llava: USER: <image>\nWhat is the color of the dog?\nASSISTANT: The color of the dog is
+And you can also try using other images and questions; this work is not limited to animals and colors.
 
 ## cite us: 
 
