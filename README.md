@@ -20,7 +20,7 @@ You can have a look at the example in Llava_visualize_code.ipynb without running
 
 Environment versions: please see **environment.yml**
 
-First, please use modeling_llava.py to replace the original file in the transformers path, which is usually in anaconda3/envs/YOUR_ENV_NAME/lib/python3.8/site-packages/transformers/models/llava. This modified file is useful for extracting the internal vectors during inference time. **Please remember to save the original file.** 
+First, please use modeling_llava.py and modeling_llama.py to replace the original file in the transformers path, which is usually in anaconda3/envs/YOUR_ENV_NAME/lib/python3.8/site-packages/transformers/models/llava. This modified file is useful for extracting the internal vectors during inference time. **Please remember to save the original file.** 
 
 Then run Llava_visualize_code.ipynb to visualize the important image patches for the generations in Llava.
 
