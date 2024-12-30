@@ -18,7 +18,7 @@ This work uses the techniques and insights in:
 
 You can have a look at the example in Llava_visualize_code.ipynb without running the code.
 
-Environment versions: please see **environment.yml**
+Environment versions: please see **environment.yml**. The llava model is downloaded at: https://huggingface.co/llava-hf/llava-1.5-7b-hf
 
 First, please use modeling_llava.py and modeling_llama.py to replace the original file in the transformers path, which is usually in anaconda3/envs/YOUR_ENV_NAME/lib/python3.8/site-packages/transformers/models/llava and anaconda3/envs/YOUR_ENV_NAME/lib/python3.8/site-packages/transformers/models/llama. These modified files are useful for extracting the internal vectors during inference time. **Please remember to save the original file.** 
 
