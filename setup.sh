@@ -1,6 +1,6 @@
 conda create -n SEES python=3.10
 source activate SEES
-pip install torch==2.1.2 torchvision==0.16.2 transformers==4.37.1 accelerate==0.26.1 bitsandbytes==0.42.0 huggingface-hub==0.20.3 matplotlib==3.7.4 Pillow==10.2.0 ipykernel==6.29.4 ipython==8.12.3 bertviz=1.4.0 opencv-python==4.10.0.84
+pip install torch==2.1.2 torchvision==0.16.2 transformers==4.37.1 accelerate==0.26.1 bitsandbytes==0.42.0 huggingface-hub==0.20.3 matplotlib==3.7.4 Pillow==10.2.0 ipykernel==6.29.4 ipython==8.12.3 bertviz==1.4.0 opencv-python==4.10.0.84
 
 #!/bin/bash
 
