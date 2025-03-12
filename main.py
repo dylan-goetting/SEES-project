@@ -19,6 +19,7 @@ from transformers import AutoProcessor, LlavaForConditionalGeneration, BitsAndBy
 from matplotlib.pyplot import MultipleLocator
 from collections import Counter
 from utils import *
+import time
 
 def main(args):
     # Constants
@@ -31,8 +32,8 @@ def main(args):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # Setup CUDA
-    # torch.set_default_device("cuda")
-    torch.cuda.set_device(args.gpu)
+    torch.set_default_device("cuda")
+    # torch.cuda.set_device(args.gpu)
     zero_tensor = torch.tensor([0.0]*4096)
     # Setup
     model_id = "llava-hf/llava-1.5-7b-hf"
@@ -41,7 +42,8 @@ def main(args):
         model_id, 
         low_cpu_mem_usage=True, 
         revision='a272c74',
-    )
+    ).cuda()
+    print(model.device)
     model.eval()
     processor = AutoProcessor.from_pretrained(model_id, revision='a272c74')
 
@@ -49,14 +51,16 @@ def main(args):
     image = Image.open(requests.get(image_url, stream=True).raw)
 
     prompt = "USER: <image>\nWhat is the color of the dog?\nASSISTANT: The color of the dog is"
+    t = time.time()
     inputs = processor(text=prompt, images=image, return_tensors="pt")
     outputs = model(**inputs)
+    print(f'Finished inference time {time.time() - t}')
     outputs_probs = get_prob(outputs["logits"][0][-1])
     outputs_probs_sort = torch.argsort(outputs_probs, descending=True)
     print([processor.decode(x) for x in outputs_probs_sort[:10]])
     print(outputs_probs_sort[:10].tolist())
     all_pos_layer_input, all_pos_layer_output, all_last_attn_subvalues, = transfer_output(outputs[2])
-    print('finished transfer_output')
+    print(f'Finished transfer output time {time.time() - t}')
     final_var = torch.tensor(all_pos_layer_output[-1][-1]).pow(2).mean(-1, keepdim=True)
 
     resample = 3
@@ -94,6 +98,7 @@ def main(args):
         cur_attn_plus_probs_increase = cur_attn_plus_probs - origin_prob
         for i in range(len(cur_attn_plus_probs_increase)):
             all_head_increase.append([str(test_layer)+"_"+str(i), round(cur_attn_plus_probs_increase[i].item(), 4)])
+    print(f'Finished head-level increase time {time.time() - t}')
 
     all_head_increase_sort = sorted(all_head_increase, key=lambda x:x[-1])[::-1]
     # print(all_head_increase_sort[:30])
@@ -119,6 +124,7 @@ def main(args):
     cur_attn_plus_probs = torch.log(get_prob(get_bsvalues(
         cur_attn_subvalues_headrecompute_curhead_plus, model, final_var))[:, predict_index])
     cur_attn_plus_probs_increase = cur_attn_plus_probs - origin_prob
+    print(f'Finished pos increase time {time.time() - t}')
 
     # head_pos_increase = cur_attn_plus_probs_increase.tolist()
     # head_pos_increase_zip = list(zip(range(pos_len), head_pos_increase))
@@ -173,6 +179,7 @@ def main(args):
     head_pos_increase = cur_attn_plus_probs_increase.tolist()
     curhead_increase_scores = head_pos_increase[5:581]
     increase_scores_normalize = normalize(curhead_increase_scores)
+    print(f'Finished getting patches time {time.time() - t}')
 
 
     # attn_scores_all = torch.tensor([0.0]*576)
