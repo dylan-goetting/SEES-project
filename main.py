@@ -18,12 +18,8 @@ from transformers.image_utils import (
 from transformers import AutoProcessor, LlavaForConditionalGeneration, BitsAndBytesConfig
 from matplotlib.pyplot import MultipleLocator
 from collections import Counter
-from utils import *
 import time
-
-import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
 from matplotlib.ticker import MultipleLocator
 
 LAYER_NUM = 32
@@ -283,8 +279,8 @@ def main():
     image = Image.open(requests.get(image_url, stream=True).raw)
     
     # Define prompt and prefix
-    prompt = "What is the color of the dog? Answer in only a single word"
-    prefix = ""
+    prompt = "What is the color of the dog?"
+    prefix = "The color of the dog is"
     
     # Get attention patches
     demo_img, increase_scores_normalize = mechanism.get_attention_patches(image, prompt, prefix)
