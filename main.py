@@ -408,48 +408,45 @@ def main():
     
     # Create LlavaMechanism instance
     mechanism = LlavaMechanism()
-    
-    # Load image
-    image_url = "http://images.cocodataset.org/val2017/000000219578.jpg"
-    image = Image.open(requests.get(image_url, stream=True).raw)
-    
-    # Define prompt and prefix
-    # prompt = "How many animals are in ?"
-    prompt = "What is the color of the dog?"
-    prefix = "The color of the dog is"
-    
-    # Get attention patches
-    demo_img, increase_scores_normalize = mechanism.get_attention_patches(image, prompt, prefix)
-    
-    # Save visualization
-    mechanism.save_vis(demo_img, increase_scores_normalize, prompt)
-    
-    # increase_scores_normalize - min: 0.0, max: 0.1541638498880645
-    # For each attention, prefix the patch row and column indices.
-    increase_scores_normalize = np.array(increase_scores_normalize)
-    increase_scores_normalize = increase_scores_normalize.reshape(24, 24)
 
-    attentions_with_locations = transform_matrix_to_3d_points(increase_scores_normalize)
-    print(f"Attentions with locations: ", attentions_with_locations.shape)
-    
-    # Remove lower percentile datapoints.
-    threshold_percentile = 80
-    filtered_attentions_with_locations = apply_threshold(attentions_with_locations, threshold_percentile)
-    print(f"Attentions without the lowest {threshold_percentile}% datapoints: ", filtered_attentions_with_locations.shape)
-    
-    # Duplicate datapoints.
-    weighted_attentions_with_locations = duplicate_points(filtered_attentions_with_locations, 1, 9)
-    
-    # Apply Euclidean distance to evaluate spatial proximity
-    # epsilon = 1.5 - eps should be >=1 since the minimum distance between 2 adjacent attentions is 1.
-    # min_samples = 15
-    db, _, _ = find_clusters(weighted_attentions_with_locations, 1.3, 15)
+    imagePrompts = [ImagePrompt("http://images.cocodataset.org/val2017/000000219578.jpg", "What is the color of the dog?", "The color of the dog is")]
 
-    save_attentions(weighted_attentions_with_locations, db, image_url)
-
-    # Calculate entropy.
-    entropy = calculate_entropy(weighted_attentions_with_locations, db)
-    print(entropy)
+    for i, imagePrompt in enumerate(imagePrompts):
+        print(f"\nProcess image {i} - {imagePrompt.image_url}")
+        image = Image.open(requests.get(image_url, stream=True).raw)
+        
+        # Get attention patches
+        demo_img, increase_scores_normalize = mechanism.get_attention_patches(image, prompt, prefix)
+        
+        # Save visualization
+        mechanism.save_vis(demo_img, increase_scores_normalize, prompt)
+        
+        # increase_scores_normalize - min: 0.0, max: 0.1541638498880645
+        # For each attention, prefix the patch row and column indices.
+        increase_scores_normalize = np.array(increase_scores_normalize)
+        increase_scores_normalize = increase_scores_normalize.reshape(24, 24)
+    
+        attentions_with_locations = transform_matrix_to_3d_points(increase_scores_normalize)
+        print(f"Attentions with locations: ", attentions_with_locations.shape)
+        
+        # Remove lower percentile datapoints.
+        threshold_percentile = 80
+        filtered_attentions_with_locations = apply_threshold(attentions_with_locations, threshold_percentile)
+        print(f"Attentions without the lowest {threshold_percentile}% datapoints: ", filtered_attentions_with_locations.shape)
+        
+        # Duplicate datapoints.
+        weighted_attentions_with_locations = duplicate_points(filtered_attentions_with_locations, 1, 9)
+        
+        # Apply Euclidean distance to evaluate spatial proximity
+        # epsilon = 1.5 - eps should be >=1 since the minimum distance between 2 adjacent attentions is 1.
+        # min_samples = 15
+        db, _, _ = find_clusters(weighted_attentions_with_locations, 1.3, 15)
+    
+        save_attentions(weighted_attentions_with_locations, db, image_url)
+    
+        # Calculate entropy.
+        entropy = calculate_entropy(weighted_attentions_with_locations, db)
+        print(entropy)
     
 if __name__ == "__main__":
     main()
