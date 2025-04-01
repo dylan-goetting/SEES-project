@@ -6,6 +6,10 @@ import matplotlib.pyplot as plt
 import requests
 import cv2
 import argparse
+import os
+import random
+import urllib.parse
+
 from PIL import Image
 from transformers.image_transforms import (
     convert_to_rgb,
@@ -16,11 +20,14 @@ from transformers.image_utils import (
     infer_channel_dimension_format,
     to_numpy_array)
 from transformers import AutoProcessor, LlavaForConditionalGeneration, BitsAndBytesConfig
+import matplotlib.pyplot as plt
 from matplotlib.pyplot import MultipleLocator
-from collections import Counter
 import time
 import torch.nn as nn
 from matplotlib.ticker import MultipleLocator
+from sklearn import metrics
+from sklearn.cluster import DBSCAN
+from collections import Counter
 
 LAYER_NUM = 32
 HEAD_NUM = 32
@@ -265,6 +272,101 @@ class LlavaMechanism:
         plt.close()
         print(f"Visualization saved to {output_path}")
 
+def transform_matrix_to_3d_points(array_2d: np.ndarray):
+    """Transforms a 2D numpy array to an array of (x, y, value) tuples, here (x, y) is the location of the value.
+
+    Example:
+        Input: [[0.3 1.7 2.5]
+                [0.1 1.2 1.9]
+               ]
+        Output:
+            [[0, 0, 0.3]
+             [0, 1, 1.7]
+             [0, 2, 2.5]
+             [1, 0, 0.1]
+             [1, 1, 1.2]
+             [1, 2, 1.9]
+            ]
+    Args:
+        array_2d: A 2D numpy array.
+
+    Returns:
+        A new numpy array where each element is a tuple (x, y, value).
+    """    
+    rows, cols = array_2d.shape    
+    result = np.empty([rows * cols, 3], dtype=object)
+
+    for x in range(rows):
+        for y in range(cols):
+            result[x * cols + y] = [y, -x + 23, array_2d[x, y]]
+
+    return result
+
+def find_clusters(attentions_with_locations: np.ndarray, eps: float, min_samples: int, metric: str="euclidean") -> (DBSCAN, int, int):
+    """Find clusters from a given attention 3D points.
+
+    Args:
+        attentions_with_locations: a list of attentions with location info.
+        eps: The maximum distance between two samples for one to be considered as in the neighborhood of the other.
+        min_samples: The number of samples in a neighborhood for a point to be considered as a core point.
+        metric: the custom metric to calculate distances between instances in the provided feature array.
+
+    Returns:
+        The DBSCAN object, the number of clusters and the number of noise points.
+    """
+    # Get the coordinates of the patches.
+    x_coords = attentions_with_locations[:, 0]
+    y_coords = attentions_with_locations[:, 1]
+    coords = np.stack((x_coords, y_coords), axis=-1)
+
+    db = DBSCAN(eps=eps, min_samples=min_samples, metric=metric).fit(coords)
+    labels = db.labels_
+
+    # Number of clusters in labels, ignoring noise if present.
+    n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+    n_noise_ = list(labels).count(-1)
+
+    print("Estimated number of clusters: %d" % n_clusters_)
+    print("Estimated number of noise points: %d" % n_noise_)
+
+    return db, n_clusters_, n_noise_
+
+def apply_threshold(datapoints: np.ndarray, percentile: float) -> np.ndarray:
+    """Remove the lowest percentile scores.
+    """
+    z_values = datapoints[:, 2]
+
+    # Calculate the percentile
+    p_value = np.percentile(z_values, percentile)
+    print(f"{percentile}th percentile value: {p_value}")
+
+    return datapoints[datapoints[:, 2] > p_value]
+
+def duplicate_points(datapoints: np.ndarray, min_dup: int, max_dup: int) -> np.ndarray:
+    """ Duplicate datapoints so that large valkues duplicates more times than smaller values.
+    """
+    # Extract value (attention score)
+    values = datapoints[:, 2]
+   
+    # Normalize value to get number of times to duplicate
+    scaled = ((values - values.min()) / (values.max() - values.min()) * (max_dup - min_dup) + min_dup + 1).astype(int)
+   
+    # Duplicate each point according to its scaled weight
+    weighted_points = np.concatenate([np.repeat([pt], rep, axis=0) for pt, rep in zip(datapoints, scaled)], axis=0)
+   
+    # print(weighted_points)
+    print(f"Original points: {len(datapoints)} -> After weighting: {len(weighted_points)}")
+    return weighted_points
+
+def save_attentions(weighted_attentions_with_locations: np.ndarray, db: DBSCAN, image_url: str):
+    parsed_url = urllib.parse.urlparse(image_url)
+    filename = os.path.basename(parsed_url.path)
+
+    plt.scatter(weighted_attentions_with_locations[:, 0], weighted_attentions_with_locations[:, 1], c=db.labels_)
+    plt.show()
+    plt.savefig(os.path.join("output_images", "attention_analysis_" + filename))
+    plt.close()
+
 
 def main():
     """
@@ -279,6 +381,7 @@ def main():
     image = Image.open(requests.get(image_url, stream=True).raw)
     
     # Define prompt and prefix
+    # prompt = "How many animals are in ?"
     prompt = "What is the color of the dog?"
     prefix = "The color of the dog is"
     
@@ -288,6 +391,28 @@ def main():
     # Save visualization
     mechanism.save_vis(demo_img, increase_scores_normalize, prompt)
     
+    # increase_scores_normalize - min: 0.0, max: 0.1541638498880645
+    # For each attention, prefix the patch row and column indices.
+    increase_scores_normalize = np.array(increase_scores_normalize)
+    increase_scores_normalize = increase_scores_normalize.reshape(24, 24)
+
+    attentions_with_locations = transform_matrix_to_3d_points(increase_scores_normalize)
+    print(f"Attentions with locations: ", attentions_with_locations.shape)
+    
+    # Remove lower percentile datapoints.
+    threshold_percentile = 80
+    filtered_attentions_with_locations = apply_threshold(attentions_with_locations, threshold_percentile)
+    print(f"Attentions without the lowest {threshold_percentile}% datapoints: ", filtered_attentions_with_locations.shape)
+    
+    # Duplicate datapoints.
+    weighted_attentions_with_locations = duplicate_points(filtered_attentions_with_locations, 1, 9)
+    
+    # Apply Euclidean distance to evaluate spatial proximity
+    # epsilon = 1.5 - eps should be >=1 since the minimum distance between 2 adjacent attentions is 1.
+    # min_samples = 15
+    db, _, _ = find_clusters(weighted_attentions_with_locations, 1.3, 15)
+
+    save_attentions(weighted_attentions_with_locations, db, image_url)
 
 if __name__ == "__main__":
     main()
