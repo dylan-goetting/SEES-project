@@ -34,6 +34,12 @@ HEAD_NUM = 32
 HEAD_DIM = 128
 HIDDEN_DIM = HEAD_NUM * HEAD_DIM
 
+@dataclass
+class Entropy:
+    cluster: int
+    count_points: int
+    average_strength: float
+
 def normalize(vector):
     max_value = max(vector)
     min_value = min(vector)
@@ -367,6 +373,33 @@ def save_attentions(weighted_attentions_with_locations: np.ndarray, db: DBSCAN, 
     plt.savefig(os.path.join("output_images", "attention_analysis_" + filename))
     plt.close()
 
+def calculate_entropy(weighted_attentions_with_locations: np.ndarray, db: DBSCAN):
+    entropy = {}
+    labels = db.labels_
+
+    # Count the number of points per cluster
+    cluster_counts = Counter(labels)
+    
+    # Count the points per cluster.
+    for label, count in cluster_counts.items():
+        if label == -1:
+            print(f"Noise (unclustered): {count} points")
+        else:
+            entropy[label] = Entropy(label, count, 0.0)
+
+    # Calculate the average strength per cluster.
+    unique_clusters = set(labels) - {-1}  # Remove noise (-1)
+    cluster_strengths = {}
+    z_values = weighted_attentions_with_locations[:, 2]
+    
+    for cluster in unique_clusters:
+        cluster_points = z_values[labels == cluster]  # Get strength values for the cluster
+        cluster_strengths[cluster] = np.mean(cluster_points)
+    
+    for cluster, avg_strength in cluster_strengths.items():
+        entropy[cluster].average_strength = avg_strength
+
+    return entropy
 
 def main():
     """
@@ -414,5 +447,9 @@ def main():
 
     save_attentions(weighted_attentions_with_locations, db, image_url)
 
+    # Calculate entropy.
+    entropy = calculate_entropy(weighted_attentions_with_locations, db)
+    print(entropy)
+    
 if __name__ == "__main__":
     main()
