@@ -28,11 +28,19 @@ from matplotlib.ticker import MultipleLocator
 from sklearn import metrics
 from sklearn.cluster import DBSCAN
 from collections import Counter
+from dataclasses import dataclass
+from batching_processing import batched_get_attention_patches
 
 LAYER_NUM = 32
 HEAD_NUM = 32
 HEAD_DIM = 128
 HIDDEN_DIM = HEAD_NUM * HEAD_DIM
+
+@dataclass
+class ImagePrompt:
+    image_url: str
+    prompt: str
+    prefix: str
 
 @dataclass
 class Entropy:
@@ -400,7 +408,7 @@ def calculate_entropy(weighted_attentions_with_locations: np.ndarray, db: DBSCAN
         entropy[cluster].average_strength = avg_strength
 
     return entropy
-
+        
 def main():
     """
     Main function to demonstrate the usage of LlavaMechanism class.
@@ -413,13 +421,13 @@ def main():
 
     for i, imagePrompt in enumerate(imagePrompts):
         print(f"\nProcess image {i} - {imagePrompt.image_url}")
-        image = Image.open(requests.get(image_url, stream=True).raw)
-        
+        image = Image.open(requests.get(imagePrompt.image_url, stream=True).raw)
+
         # Get attention patches
-        demo_img, increase_scores_normalize = mechanism.get_attention_patches(image, prompt, prefix)
+        demo_img, increase_scores_normalize = mechanism.get_attention_patches(image, imagePrompt.prompt, imagePrompt.prefix)
         
         # Save visualization
-        mechanism.save_vis(demo_img, increase_scores_normalize, prompt)
+        mechanism.save_vis(demo_img, increase_scores_normalize, imagePrompt.prompt)
         
         # increase_scores_normalize - min: 0.0, max: 0.1541638498880645
         # For each attention, prefix the patch row and column indices.
@@ -442,11 +450,10 @@ def main():
         # min_samples = 15
         db, _, _ = find_clusters(weighted_attentions_with_locations, 1.3, 15)
     
-        save_attentions(weighted_attentions_with_locations, db, image_url)
-    
         # Calculate entropy.
         entropy = calculate_entropy(weighted_attentions_with_locations, db)
-        print(entropy)
-    
+        print(entropy)    
+        save_attentions(weighted_attentions_with_locations, db, imagePrompt.image_url)
+
 if __name__ == "__main__":
     main()
