@@ -6,15 +6,19 @@ from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import requests
 from io import BytesIO
-from torchvision.transforms import ToTensor
+from torchvision.transforms import ToTensor, Resize, Compose
 
 # Paths
-PROCESSED_DATA_PATH = "data/processed/filtered_vqa_with_links.json"
+PROCESSED_DATA_PATH = "data_processing/data/processed/filtered_vqa_with_links.json"
 
 # Load processed VQA data
 try:
     with open(PROCESSED_DATA_PATH, "r") as f:
         dataset = json.load(f)
+
+    # ✅ Limit to the first 20 samples
+    dataset = dataset[:20]
+
     print(f"✅ Successfully loaded dataset from {PROCESSED_DATA_PATH}")
 except FileNotFoundError:
     print(f"❌ Error: File not found at {PROCESSED_DATA_PATH}")
@@ -36,7 +40,10 @@ def inference(question, image):
 class VQADataset(Dataset):
     def __init__(self, data):
         self.data = data
-        self.to_tensor = ToTensor()  # Convert images to tensors
+        self.transform = Compose([
+            Resize((224, 224)),
+            ToTensor()
+        ])
 
     def __len__(self):
         return len(self.data)
@@ -50,24 +57,31 @@ class VQADataset(Dataset):
         category = sample.get("category", "[MISSING CATEGORY]")
         answer = sample.get("answer", "[MISSING ANSWER]")
 
-        # Load image from URL if available
-        image = None
+        # Load image from URL
+        image = torch.zeros(3, 224, 224)  # Default image if loading fails
         if image_url:
             try:
                 response = requests.get(image_url, timeout=5)
                 response.raise_for_status()
                 image = Image.open(BytesIO(response.content)).convert("RGB")
-                image = self.to_tensor(image)  # Convert to tensor
+                image = self.transform(image)
             except Exception as e:
                 print(f"❌ Error loading image from {image_url}: {e}")
-                image = torch.zeros(3, 224, 224)  # Default black image
 
         return question_text, image, category, answer
 
+# Custom collate function
+def custom_collate(batch):
+    questions = [item[0] for item in batch]
+    images = torch.stack([item[1] for item in batch])
+    categories = [item[2] for item in batch]
+    answers = [item[3] for item in batch]
+    return questions, images, categories, answers
+
 # Load dataset into DataLoader
-batch_size = 16  # Adjust based on available GPU/CPU memory
+batch_size = 16
 vqa_dataset = VQADataset(dataset)
-dataloader = DataLoader(vqa_dataset, batch_size=batch_size, shuffle=True)
+dataloader = DataLoader(vqa_dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate)
 
 # Entropy function to compute the entropy of a probability distribution
 def compute_entropy(probabilities):
@@ -96,4 +110,7 @@ for batch in dataloader:
     # Log batch processing results
     print(f"✅ Batch Processed | Entropy: {entropy:.4f} | Categories: {set(categories)}")
 
-print(len(vqa_dataset))
+print(f"\n📦 Total Samples in Dataset: {len(vqa_dataset)}")
+
+__all__ = ["dataloader"]
+
