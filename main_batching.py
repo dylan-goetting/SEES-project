@@ -10,7 +10,7 @@ import os
 import random
 import urllib.parse
 
-from PIL import Image
+from PIL import Image, ImageDraw
 from transformers.image_transforms import (
     convert_to_rgb,
     get_resize_output_image_size,
@@ -161,17 +161,17 @@ class LlavaMechanism:
         os.makedirs(self.output_dir, exist_ok=True)
     def get_attention_patches(self, images, prompts, prefixes):
         """
-        Batches together the images     
+        Processes a true batch of different images with proper timing and validation
         
         Args:
-            image (PIL.Image): Input image
-            prompt (str): The prompt text
-            prefix (str): The prefix text after ASSISTANT tag
+            images (list): List of PIL.Image objects
+            prompts (list): List of prompt strings
+            prefixes (list): List of prefix strings
             
         Returns:
-            tuple: (demo_img, increase_scores_normalize)
+            list: List of tuples (demo_img, increase_scores_normalize)
         """
-
+        
         if len(images) != len(prompts) or len(images) != len(prefixes):
             raise ValueError("Input lists must have equal length")
         if not images:
@@ -179,9 +179,13 @@ class LlavaMechanism:
     
         batch_size = len(images)
         batch_results = []
-        start_time = time.time()
+        
+        # Verify input is not duplicating
+        input_hashes = [hash(img.tobytes()) for img in images]
+        if len(set(input_hashes)) != batch_size:
+            print(f"⚠️ Warning: Detected {batch_size - len(set(input_hashes))} duplicate inputs!")
     
-        # Convert images to RGB
+        # Convert to RGB
         processed_images = []
         for img in images:
             try:
@@ -195,7 +199,7 @@ class LlavaMechanism:
                 processed_images.append(Image.new('RGB', (336, 336)))
     
         try:
-            # Process batch
+            # Processing
             inputs = self.processor(
                 text=[f"USER: <image>\n{p}\nASSISTANT: {pre}" for p, pre in zip(prompts, prefixes)],
                 images=processed_images,
@@ -204,11 +208,19 @@ class LlavaMechanism:
                 truncation=True
             ).to(self.model.device)
     
-            # Forward pass
-            outputs = self.model(**inputs)
-            print(f"Processed batch of {batch_size} in {time.time()-start_time:.2f}s")
+            # Foward pass with timing
+            start_time = time.time()
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            model_time = time.time() - start_time
+            
+            print(f"\n=== BATCH PROCESSING ===")
+            print(f"Batch size: {batch_size}")
+            print(f"Pure model time: {model_time:.2f}s")
+            print(f"Time per image: {model_time/batch_size:.2f}s")
     
-            # Process each sample
+            # Process outputs
+            first_attention = None
             for i in range(batch_size):
                 try:
                     # Image processing
@@ -232,16 +244,23 @@ class LlavaMechanism:
     
                     # Attention processing
                     last_layer_attn = outputs.attentions[-1][i]  
-                    visual_attention = last_layer_attn[:, -1, 5:581].mean(0)  
-                    attention_scores = visual_attention.detach().cpu().numpy() 
+                    visual_attention = last_layer_attn[:, -1, 5:581].mean(0)
+                    attention_scores = visual_attention.detach().cpu().numpy()
+                    
+                    if i == 0:
+                        first_attention = attention_scores.copy()
+                    
+                    if i > 0 and first_attention is not None:
+                        diff = np.max(np.abs(attention_scores - first_attention))
+                        if diff < 0.01:
+                            print(f"⚠️ Warning: Result {i} shows minimal difference (max diff: {diff:.4f})")
+    
                     increase_scores_normalize = normalize(attention_scores)
+                    batch_results.append((demo_img, increase_scores_normalize))
     
                 except Exception as e:
                     print(f"Error processing sample {i}: {e}")
-                    demo_img = np.zeros((336, 336, 3), dtype=np.uint8)
-                    increase_scores_normalize = [0.0] * 576
-    
-                batch_results.append((demo_img, increase_scores_normalize))
+                    batch_results.append((np.zeros((336, 336, 3)), [0.0]*576))
     
         except Exception as e:
             print(f"Batch processing failed: {e}")
@@ -436,9 +455,18 @@ def main():
 
     # Create batch
     batch_size = 5
-    images = [image] * batch_size
-    prompts = [test_prompt] * batch_size
-    prefixes = [test_prefix] * batch_size
+    images = []
+    prompts = []
+    prefixes = []
+
+    for i in range(batch_size):
+        img = image.copy()
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([i*20, i*20, i*20+50, i*20+50], fill=(i*50, 255-i*40, i*30))
+        images.append(img)
+        
+        prompts.append(f"What is the color of pattern {i}?")
+        prefixes.append(f"the pattern is color")
 
     # Process batch with timing
     start_time = time.time()
@@ -459,12 +487,14 @@ def main():
     print(f"Avg output difference: {avg_diff:.4f} {'✅' if avg_diff > 0.01 else '❌ (possible duplicates)'}")
 
     # Verify results are identical 
-    first_scores = batch_results[0][1] 
-    
+    first_scores_np = np.array(batch_results[0][1])
+
     for i, (image, scores) in enumerate(batch_results):
-        if not np.array_equal(scores, first_scores):
+        scores_np = np.array(scores)  
+        
+        if not np.array_equal(scores_np, first_scores_np):
             print(f"Score differences in result {i}:")
-            print("Max diff:", np.max(np.abs(scores - first_scores)))
+            print("Max diff:", np.max(np.abs(scores_np - first_scores_np)))
         elif not np.array_equal(image, batch_results[0][0]):
             print(f"Image differences in result {i}")
         else:
@@ -473,13 +503,11 @@ def main():
     # Process and visualize (only first result because they should be the same)
     demo_img, increase_scores_normalize = batch_results[0]
     
+    # Save visualization
     mechanism.save_vis(demo_img, increase_scores_normalize, test_prompt)
     
-    increase_scores_normalize = np.array(increase_scores_normalize)
-    increase_scores_normalize = increase_scores_normalize.reshape(24, 24)
-
-    attentions_with_locations = transform_matrix_to_3d_points(increase_scores_normalize)
-    print(f"Attentions with locations: ", attentions_with_locations.shape)
+    # Create attention matrix for visualization
+    attention_matrix = np.array(increase_scores_normalize).reshape(24, 24)
     
     # Visualize the raw attention matrix
     plt.figure(figsize=(10, 8))
@@ -489,31 +517,35 @@ def main():
     plt.xlabel("X Position")
     plt.ylabel("Y Position")
     plt.grid(False)
-    plt.show()
     
     matrix_path = os.path.join("output_images", "attention_matrix.png")
     plt.savefig(matrix_path)
     plt.close()
     print(f"\nAttention matrix saved to {matrix_path}")
     
-    # Remove lower percentile datapoints.
+    # Cluster analysis
+    attentions_with_locations = transform_matrix_to_3d_points(attention_matrix)
+    print(f"Attentions with locations: {attentions_with_locations.shape}")
+    
+    # Remove lower percentile datapoints
     threshold_percentile = 60
     filtered_attentions_with_locations = apply_threshold(attentions_with_locations, threshold_percentile)
-    print(f"Attentions without the lowest {threshold_percentile}% datapoints: ", filtered_attentions_with_locations.shape)
+    print(f"Attentions without the lowest {threshold_percentile}% datapoints: {filtered_attentions_with_locations.shape}")
     
     # Duplicate datapoints
     weighted_attentions_with_locations = duplicate_points(filtered_attentions_with_locations, 1, 9)
     
     # Find clusters
-    db, _, _ = find_clusters(weighted_attentions_with_locations, 1.3, 15)
+    db, n_clusters, n_noise = find_clusters(weighted_attentions_with_locations, 1.3, 15)
 
     # Calculate entropy
     entropy = calculate_entropy(weighted_attentions_with_locations, db)
-    print(entropy)    
-    save_attentions(weighted_attentions_with_locations, db, test_image_url)
     print("\n=== CLUSTER RESULTS ===")
     print(f"Clusters: {n_clusters}, Noise points: {n_noise}")
     print("Cluster details:", entropy)
+    
+    # Save cluster visualization
+    save_attentions(weighted_attentions_with_locations, db, test_image_url)
 
 if __name__ == "__main__":
     main()
