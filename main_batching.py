@@ -11,6 +11,7 @@ import random
 import urllib.parse
 
 from PIL import Image, ImageDraw
+from PIL import Image
 from transformers.image_transforms import (
     convert_to_rgb,
     get_resize_output_image_size,
@@ -53,7 +54,6 @@ def normalize(vector):
     vector1 = [(x-min_value)/(max_value-min_value) for x in vector]
     vector2 = [x/sum(vector1) for x in vector1]
     return vector2
-
 
 def transfer_output(model_output):
     all_pos_layer_input = []
@@ -171,21 +171,11 @@ class LlavaMechanism:
         Returns:
             list: List of tuples (demo_img, increase_scores_normalize)
         """
-        
+
         if len(images) != len(prompts) or len(images) != len(prefixes):
             raise ValueError("Input lists must have equal length")
-        if not images:
-            return []
     
-        batch_size = len(images)
-        batch_results = []
-        
-        # Verify input is not duplicating
-        input_hashes = [hash(img.tobytes()) for img in images]
-        if len(set(input_hashes)) != batch_size:
-            print(f"⚠️ Warning: Detected {batch_size - len(set(input_hashes))} duplicate inputs!")
-    
-        # Convert to RGB
+        # Preprocess images
         processed_images = []
         for img in images:
             try:
@@ -198,76 +188,93 @@ class LlavaMechanism:
                 print(f"Image processing error: {e}")
                 processed_images.append(Image.new('RGB', (336, 336)))
     
-        try:
-            # Processing
-            inputs = self.processor(
-                text=[f"USER: <image>\n{p}\nASSISTANT: {pre}" for p, pre in zip(prompts, prefixes)],
-                images=processed_images,
-                return_tensors="pt",
-                padding=True,
-                truncation=True
-            ).to(self.model.device)
+        # Batch processing
+        inputs = self.processor(
+            text=[f"USER: <image>\n{p}\nASSISTANT: {pre}" for p, pre in zip(prompts, prefixes)],
+            images=processed_images,
+            return_tensors="pt",
+            padding=True,
+            truncation=True
+        ).to(self.model.device)
     
-            # Foward pass with timing
-            start_time = time.time()
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-            model_time = time.time() - start_time
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+    
+        batch_results = []
+        for i in range(len(images)):
+            # Get predicted token
+            outputs_probs = get_prob(outputs.logits[i][-1])
+            outputs_probs_sort = torch.argsort(outputs_probs, descending=True)
+            predict_index = outputs_probs_sort[0].item()
+    
+            # Process layers
+            all_head_increase = []
+            final_var = outputs.hidden_states[-1][i][-1].pow(2).mean(-1, keepdim=True)
             
-            print(f"\n=== BATCH PROCESSING ===")
-            print(f"Batch size: {batch_size}")
-            print(f"Pure model time: {model_time:.2f}s")
-            print(f"Time per image: {model_time/batch_size:.2f}s")
-    
-            # Process outputs
-            first_attention = None
-            for i in range(batch_size):
-                try:
-                    # Image processing
-                    image_numpy = to_numpy_array(processed_images[i])
-                    input_data_format = infer_channel_dimension_format(image_numpy)
-                    output_size = get_resize_output_image_size(
-                        image_numpy, size=336,
-                        default_to_square=False,
-                        input_data_format=input_data_format
-                    )
-                    image_resize = resize(
-                        image_numpy, output_size,
-                        resample=3,
-                        input_data_format=input_data_format
-                    )
-                    demo_img = center_crop(
-                        image_resize,
-                        size=(336, 336),
-                        input_data_format=input_data_format
-                    )
-    
-                    # Attention processing
-                    last_layer_attn = outputs.attentions[-1][i]  
-                    visual_attention = last_layer_attn[:, -1, 5:581].mean(0)
-                    attention_scores = visual_attention.detach().cpu().numpy()
+            for layer_i in range(LAYER_NUM):
+                layer = self.model.language_model.model.layers[layer_i]
+                cur_layer_input = outputs.hidden_states[layer_i][i][-1]  
+                cur_attention = outputs.attentions[layer_i][i][:, -1, :]
+                
+                # Get output projection weights
+                o_proj = layer.self_attn.o_proj.weight.data 
+                
+                # Compute attention-weighted values for each head
+                hidden_states = outputs.hidden_states[layer_i][i] 
+                for head_j in range(HEAD_NUM):
+                    attn_weights = cur_attention[head_j]
+                    weighted_values = torch.matmul(
+                        attn_weights.unsqueeze(0), 
+                        hidden_states  
+                    ) 
                     
-                    if i == 0:
-                        first_attention = attention_scores.copy()
+                    head_start = head_j * HEAD_DIM
+                    head_end = (head_j + 1) * HEAD_DIM
+                    head_weight = o_proj[head_start:head_end, :]  
                     
-                    if i > 0 and first_attention is not None:
-                        diff = np.max(np.abs(attention_scores - first_attention))
-                        if diff < 0.01:
-                            print(f"⚠️ Warning: Result {i} shows minimal difference (max diff: {diff:.4f})")
+                    head_impact = torch.matmul(
+                        weighted_values, 
+                        head_weight.T 
+                    ) 
+                    
+                    head_impact_full = torch.zeros_like(cur_layer_input)
+                    head_impact_full[head_start:head_end] = head_impact.squeeze(0)
+                    
+                    # Calculate probability 
+                    origin_prob = torch.log(get_prob(get_bsvalues(
+                        cur_layer_input, self.model, final_var))[predict_index])
+                    
+                    modified_input = cur_layer_input + head_impact_full
+                    new_prob = torch.log(get_prob(get_bsvalues(
+                        modified_input, self.model, final_var))[predict_index])
+                    
+                    all_head_increase.append((
+                        f"{layer_i}_{head_j}",
+                        (new_prob - origin_prob).item()
+                    ))
     
-                    increase_scores_normalize = normalize(attention_scores)
-                    batch_results.append((demo_img, increase_scores_normalize))
+            # Select best head
+            all_head_increase.sort(key=lambda x: x[1], reverse=True)
+            best_head = all_head_increase[0][0]
+            best_head_layer, best_head_idx = map(int, best_head.split('_'))
+            
+            # Get attention weights
+            best_head_attention = outputs.attentions[best_head_layer][i][best_head_idx, -1, 5:581].cpu().numpy()
+            increase_scores_normalize = normalize(best_head_attention)
     
-                except Exception as e:
-                    print(f"Error processing sample {i}: {e}")
-                    batch_results.append((np.zeros((336, 336, 3)), [0.0]*576))
+            # Prepare image
+            image_numpy = to_numpy_array(processed_images[i])
+            input_data_format = infer_channel_dimension_format(image_numpy)
+            demo_img = center_crop(
+                resize(image_numpy, size=(336, 336), input_data_format=input_data_format),
+                size=(336, 336),
+                input_data_format=input_data_format
+            )
     
-        except Exception as e:
-            print(f"Batch processing failed: {e}")
-            batch_results = [(np.zeros((336, 336, 3)), [0.0]*576) for _ in range(batch_size)]
+            batch_results.append((demo_img, increase_scores_normalize))
     
         return batch_results
-        
+                    
     def save_vis(self, demo_img, increase_scores_normalize, output_path=None):
         """
         Save a visualization of the original image with overlayed attention patches.
@@ -310,7 +317,8 @@ class LlavaMechanism:
         print(f"Visualization saved to {output_path}")
 
 def transform_matrix_to_3d_points(array_2d: np.ndarray):
-    """Transforms a 2D numpy array to an array of (x, y, value) tuples, here (x, y) is the location of the value.
+    """
+    Transforms a 2D numpy array to an array of (x, y, value) tuples, here (x, y) is the location of the value.
 
     Example:
         Input: [[0.3 1.7 2.5]
@@ -340,7 +348,8 @@ def transform_matrix_to_3d_points(array_2d: np.ndarray):
     return result
 
 def find_clusters(attentions_with_locations: np.ndarray, eps: float, min_samples: int, metric: str="euclidean") -> (DBSCAN, int, int):
-    """Find clusters from a given attention 3D points.
+    """
+    Find clusters from a given attention 3D points.
 
     Args:
         attentions_with_locations: a list of attentions with location info.
@@ -369,7 +378,8 @@ def find_clusters(attentions_with_locations: np.ndarray, eps: float, min_samples
     return db, n_clusters_, n_noise_
 
 def apply_threshold(datapoints: np.ndarray, percentile: float) -> np.ndarray:
-    """Remove the lowest percentile scores.
+    """
+    Remove the lowest percentile scores.
     """
     z_values = datapoints[:, 2]
 
@@ -380,7 +390,8 @@ def apply_threshold(datapoints: np.ndarray, percentile: float) -> np.ndarray:
     return datapoints[datapoints[:, 2] > p_value]
 
 def duplicate_points(datapoints: np.ndarray, min_dup: int, max_dup: int) -> np.ndarray:
-    """ Duplicate datapoints so that large valkues duplicates more times than smaller values.
+    """ 
+    Duplicate datapoints so that large valkues duplicates more times than smaller values.
     """
     # Extract value (attention score)
     values = datapoints[:, 2]
@@ -419,12 +430,12 @@ def calculate_entropy(weighted_attentions_with_locations: np.ndarray, db: DBSCAN
             entropy[label] = Entropy(label, count, 0.0)
 
     # Calculate the average strength per cluster.
-    unique_clusters = set(labels) - {-1}  # Remove noise (-1)
+    unique_clusters = set(labels) - {-1} 
     cluster_strengths = {}
     z_values = weighted_attentions_with_locations[:, 2]
     
     for cluster in unique_clusters:
-        cluster_points = z_values[labels == cluster]  # Get strength values for the cluster
+        cluster_points = z_values[labels == cluster]  
         cluster_strengths[cluster] = np.mean(cluster_points)
     
     for cluster, avg_strength in cluster_strengths.items():
@@ -433,119 +444,91 @@ def calculate_entropy(weighted_attentions_with_locations: np.ndarray, db: DBSCAN
     return entropy
         
 def main():
-    """
-    Main function to demonstrate the usage of LlavaMechanism class.
-    """
     mechanism = LlavaMechanism()
     
+    # Load test image
     test_image_url = "http://images.cocodataset.org/val2017/000000219578.jpg"
-    test_prompt = "What is the color of the dog?"
-    test_prefix = "the dog is the color"
+    response = requests.get(test_image_url, stream=True)
+    image = Image.open(response.raw).convert('RGB')
 
-    # Load images
-    try:
-        response = requests.get(test_image_url, stream=True)
-        response.raise_for_status()
-        image = Image.open(response.raw)
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-    except Exception as e:
-        print(f"Error loading image: {e}")
-        return
-
-    # Create batch
     batch_size = 5
     images = []
     prompts = []
     prefixes = []
 
+    # Create unique test images
     for i in range(batch_size):
         img = image.copy()
         draw = ImageDraw.Draw(img)
-        draw.rectangle([i*20, i*20, i*20+50, i*20+50], fill=(i*50, 255-i*40, i*30))
+        draw.rectangle([i*20, i*20, i*20+50, i*20+50], 
+                      fill=(random.randint(0,255), 
+                      random.randint(0,255), 
+                      random.randint(0,255)))
         images.append(img)
-        
-        prompts.append(f"What is the color of pattern {i}?")
-        prefixes.append(f"the pattern is color")
+        prompts.append(f"How many pets are there{i}?")
+        prefixes.append(f"The number of pets is")
 
     # Process batch with timing
+    print("\nStarting batch processing...")
     start_time = time.time()
-    batch_results = mechanism.get_attention_patches(images, prompts, prefixes)
-    total_time = time.time() - start_time
-
-    # Batch verification
-    print("\n=== BATCH VERIFICATION ===")
-    print(f"Processed {len(batch_results)} items in {total_time:.2f}s")
     
-    input_hashes = [hash(img.tobytes()) for img in images]
-    unique_inputs = len(set(input_hashes))
-    print(f"Unique inputs: {unique_inputs}/{batch_size} {'✅' if unique_inputs == batch_size else '❌'}")
-
-    first_scores = np.array(batch_results[0][1])
-    diffs = [np.max(np.abs(np.array(r[1]) - first_scores)) for r in batch_results[1:]]
-    avg_diff = np.mean(diffs)
-    print(f"Avg output difference: {avg_diff:.4f} {'✅' if avg_diff > 0.01 else '❌ (possible duplicates)'}")
-
-    # Verify results are identical 
-    first_scores_np = np.array(batch_results[0][1])
-
-    for i, (image, scores) in enumerate(batch_results):
-        scores_np = np.array(scores)  
+    try:
+        batch_results = mechanism.get_attention_patches(images, prompts, prefixes)
+        total_time = time.time() - start_time
         
-        if not np.array_equal(scores_np, first_scores_np):
-            print(f"Score differences in result {i}:")
-            print("Max diff:", np.max(np.abs(scores_np - first_scores_np)))
-        elif not np.array_equal(image, batch_results[0][0]):
-            print(f"Image differences in result {i}")
-        else:
-            print(f"Result {i} matches first result perfectly")
-
-    # Process and visualize (only first result because they should be the same)
-    demo_img, increase_scores_normalize = batch_results[0]
-    
-    # Save visualization
-    mechanism.save_vis(demo_img, increase_scores_normalize, test_prompt)
-    
-    # Create attention matrix for visualization
-    attention_matrix = np.array(increase_scores_normalize).reshape(24, 24)
-    
-    # Visualize the raw attention matrix
-    plt.figure(figsize=(10, 8))
-    plt.imshow(attention_matrix, cmap='viridis', aspect='auto')
-    plt.colorbar(label='Attention Strength')
-    plt.title("Raw Attention Matrix (24x24)")
-    plt.xlabel("X Position")
-    plt.ylabel("Y Position")
-    plt.grid(False)
-    
-    matrix_path = os.path.join("output_images", "attention_matrix.png")
-    plt.savefig(matrix_path)
-    plt.close()
-    print(f"\nAttention matrix saved to {matrix_path}")
-    
-    # Cluster analysis
-    attentions_with_locations = transform_matrix_to_3d_points(attention_matrix)
-    print(f"Attentions with locations: {attentions_with_locations.shape}")
-    
-    # Remove lower percentile datapoints
-    threshold_percentile = 60
-    filtered_attentions_with_locations = apply_threshold(attentions_with_locations, threshold_percentile)
-    print(f"Attentions without the lowest {threshold_percentile}% datapoints: {filtered_attentions_with_locations.shape}")
-    
-    # Duplicate datapoints
-    weighted_attentions_with_locations = duplicate_points(filtered_attentions_with_locations, 1, 9)
-    
-    # Find clusters
-    db, n_clusters, n_noise = find_clusters(weighted_attentions_with_locations, 1.3, 15)
-
-    # Calculate entropy
-    entropy = calculate_entropy(weighted_attentions_with_locations, db)
-    print("\n=== CLUSTER RESULTS ===")
-    print(f"Clusters: {n_clusters}, Noise points: {n_noise}")
-    print("Cluster details:", entropy)
-    
-    # Save cluster visualization
-    save_attentions(weighted_attentions_with_locations, db, test_image_url)
+        # Batch verification
+        print("\n=== BATCH PROCESSING RESULTS ===")
+        print(f"Processed {len(batch_results)} items in {total_time:.2f} seconds")
+        print(f"Average time per image: {total_time/len(batch_results):.2f}s")
+        
+        # Input verification
+        input_hashes = [hash(img.tobytes()) for img in images]
+        unique_inputs = len(set(input_hashes))
+        print(f"\nInput verification:")
+        print(f"Unique inputs: {unique_inputs}/{batch_size} {'✅' if unique_inputs == batch_size else '❌'}")
+        
+        # Output verification
+        first_scores = np.array(batch_results[0][1])
+        diffs = []
+        for i, (img, scores) in enumerate(batch_results):
+            diff = np.max(np.abs(np.array(scores) - first_scores))
+            diffs.append(diff)
+            status = "✅" if diff > 0.01 else "❌ (possible duplicate)"
+            print(f"Result {i+1} vs first - Max diff: {diff:.4f} {status}")
+        
+        avg_diff = np.mean(diffs)
+        print(f"\nAverage output difference: {avg_diff:.4f}")
+        
+        # Cluster analysis for first image
+        if batch_results:
+            demo_img, increase_scores_normalize = batch_results[0]
+            print("\n=== CLUSTERING ===")
+            
+            # Timing cluster analysis
+            attention_matrix = np.array(increase_scores_normalize).reshape(24, 24)
+            points_3d = transform_matrix_to_3d_points(attention_matrix)
+            filtered_points = apply_threshold(points_3d, 80)
+            weighted_points = duplicate_points(filtered_points, 1, 9)
+            db, n_clusters, n_noise = find_clusters(weighted_points, 1.3, 15)
+            
+            print(f"Number of clusters: {n_clusters}")
+            print(f"Noise points: {n_noise}")
+            save_attentions(weighted_points, db, "output_clusters.png")
+            
+            # Save visualizations
+            mechanism.save_vis(demo_img, increase_scores_normalize, "batch_result")
+            
+            # Save attention matrix
+            plt.figure(figsize=(10, 10))
+            plt.imshow(attention_matrix, cmap='viridis', aspect='auto')
+            plt.colorbar(label='Attention Strength')
+            plt.title("Attention Matrix (24x24)")
+            plt.savefig(os.path.join("output_images", "attention_matrix.png"))
+            plt.close()
+            
+    except Exception as e:
+        print(f"\nError during processing: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     main()
