@@ -381,34 +381,16 @@ def save_attentions(weighted_attentions_with_locations: np.ndarray, db: DBSCAN, 
     plt.savefig(os.path.join("output_images", "attention_analysis_" + filename))
     plt.close()
 
-def calculate_entropy(weighted_attentions_with_locations: np.ndarray, db: DBSCAN):
-    entropy = {}
-    labels = db.labels_
+def calculate_entropy(datapoints: list):
+    flat_list = [item for sublist in datapoints for item in sublist]
+    total_count = len(flat_list)
+    counts = Counter(flat_list)
+    probabilities = [count / total_count for count in counts.values()]
+    entropy = -sum(p * np.log2(p) for p in probabilities if p > 0)
+    max_entropy = np.log2(len(counts))
+    normalized_entropy = entropy / max_entropy
+    return normalized_entropy
 
-    # Count the number of points per cluster
-    cluster_counts = Counter(labels)
-    
-    # Count the points per cluster.
-    for label, count in cluster_counts.items():
-        if label == -1:
-            print(f"Noise (unclustered): {count} points")
-        else:
-            entropy[label] = Entropy(label, count, 0.0)
-
-    # Calculate the average strength per cluster.
-    unique_clusters = set(labels) - {-1}  # Remove noise (-1)
-    cluster_strengths = {}
-    z_values = weighted_attentions_with_locations[:, 2]
-    
-    for cluster in unique_clusters:
-        cluster_points = z_values[labels == cluster]  # Get strength values for the cluster
-        cluster_strengths[cluster] = np.mean(cluster_points)
-    
-    for cluster, avg_strength in cluster_strengths.items():
-        entropy[cluster].average_strength = avg_strength
-
-    return entropy
-        
 def main():
     """
     Main function to demonstrate the usage of LlavaMechanism class.
@@ -451,9 +433,8 @@ def main():
         db, _, _ = find_clusters(weighted_attentions_with_locations, 1.3, 15)
     
         # Calculate entropy.
-        entropy = calculate_entropy(weighted_attentions_with_locations, db)
-        print(entropy)    
-        save_attentions(weighted_attentions_with_locations, db, imagePrompt.image_url)
+        entropy = calculate_entropy(increase_scores_normalize)
+        print(f"Attention Entropy: {entropy:.4f}")
 
 if __name__ == "__main__":
     main()
