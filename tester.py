@@ -52,9 +52,9 @@ def generate_prefix(question: str) -> str:
 # 3) Build prompt + prefix
 def build_instruction(question: str, qtype: str) -> str:
     if qtype == "Object Identification":
-        prompt = f"Answer with only one full English word or phrase. Dont output any numbers, spaces or anything else that is not a full word {question}"
+        prompt = f"Answer with only one full English word or phrase. {question}"
     elif qtype == "Classification":
-        prompt = f"Answer only with one full English word or phrase. Dont output any numbers, spaces or anything else that is not a full word {question}"
+        prompt = f"Answer only with one full English word or phrase.{question}"
     elif qtype == "Color Recognition":
         prompt = f"Only respond with a color: {question}"
     elif qtype == "Yes/No":
