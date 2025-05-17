@@ -29,7 +29,7 @@ from sklearn import metrics
 from sklearn.cluster import DBSCAN
 from collections import Counter
 from dataclasses import dataclass
-from batching_processing import batched_get_attention_patches
+#from batching_processing import batched_get_attention_patches
 
 LAYER_NUM = 32
 HEAD_NUM = 32
@@ -395,12 +395,12 @@ def calculate_metrics(db: DBSCAN, weighted_attentions_with_locations):
     cluster_strengths = {}
 
     # Count the number of points per cluster
-    cluster_counts = Counter(labels)
+#    cluster_counts = Counter(labels)
 
-    print("Points per cluster:")
-    for label, count in cluster_counts.items():
-        if label != -1:
-            cluster_strengths[label] = ClusterData(count, 0)
+#    print("Points per cluster:")
+#    for label, count in cluster_counts.items():
+#        if label != -1:
+#            cluster_strengths[label] = ClusterData(count, 0)
 
     # 
     z_values = weighted_attentions_with_locations[:, 2]
@@ -414,7 +414,7 @@ def calculate_metrics(db: DBSCAN, weighted_attentions_with_locations):
             cluster_strengths[cluster] = ClusterData(0, np.mean(cluster_points))
 
     # Print average strength of each cluster
-    print("Average Strength per Cluster:")
+    print("Average Strength and Number of Points per Cluster:")
     for cluster, data in cluster_strengths.items():
         print(f"Cluster {cluster}: {data}")
         
@@ -435,16 +435,7 @@ def cluster_entropy(db:DBSCAN, weighted_attentions_with_locations):
     unique_clusters = set(labels) - {-1}  # Remove noise (-1)
 
     cluster_strengths = {}
-
-    # Count the number of points per cluster
-    cluster_counts = Counter(labels)
-
-    print("Points per cluster:")
-    for label, count in cluster_counts.items():
-        if label != -1:
-            cluster_strengths[label] = ClusterData(count, 0)
-
-    # 
+    
     z_values = weighted_attentions_with_locations[:, 2]
 
     for cluster in unique_clusters:
