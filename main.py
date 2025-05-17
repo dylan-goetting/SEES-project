@@ -242,7 +242,7 @@ class LlavaMechanism:
         increase_scores_normalize = normalize(curhead_increase_scores)
         print(f'Finished getting patches time {time.time() - t}')
         
-        return demo_img, increase_scores_normalize
+        return demo_img, increase_scores_normalize, outputs_probs_sort
     
     def save_vis(self, demo_img, increase_scores_normalize, output_path=None):
         """
@@ -381,10 +381,94 @@ def save_attentions(weighted_attentions_with_locations: np.ndarray, db: DBSCAN, 
     plt.savefig(os.path.join("output_images", "attention_analysis_" + filename))
     plt.close()
 
+from dataclasses import dataclass
+
+@dataclass
+class ClusterData:
+    n_points: int
+    ave_strength: float
+    
+def calculate_metrics(db: DBSCAN, weighted_attentions_with_locations):
+    labels = db.labels_
+    unique_clusters = set(labels) - {-1}  # Remove noise (-1)
+
+    cluster_strengths = {}
+
+    # Count the number of points per cluster
+    cluster_counts = Counter(labels)
+
+    print("Points per cluster:")
+    for label, count in cluster_counts.items():
+        if label != -1:
+            cluster_strengths[label] = ClusterData(count, 0)
+
+    # 
+    z_values = weighted_attentions_with_locations[:, 2]
+
+    for cluster in unique_clusters:
+        cluster_points = z_values[labels == cluster]  # Get strength values for the cluster
+
+        if cluster in cluster_strengths:
+            cluster_strengths[cluster].ave_strength = np.mean(cluster_points)
+        else:
+            cluster_strengths[cluster] = ClusterData(0, np.mean(cluster_points))
+
+    # Print average strength of each cluster
+    print("Average Strength per Cluster:")
+    for cluster, data in cluster_strengths.items():
+        print(f"Cluster {cluster}: {data}")
+        
+    return cluster_strengths
+
 def calculate_entropy(datapoints: list):
     flat_list = [item for sublist in datapoints for item in sublist]
     total_count = len(flat_list)
     counts = Counter(flat_list)
+    probabilities = [count / total_count for count in counts.values()]
+    entropy = -sum(p * np.log2(p) for p in probabilities if p > 0)
+    max_entropy = np.log2(len(counts))
+    normalized_entropy = entropy / max_entropy
+    return normalized_entropy
+
+def cluster_entropy(db:DBSCAN, weighted_attentions_with_locations):
+    labels = db.labels_
+    unique_clusters = set(labels) - {-1}  # Remove noise (-1)
+
+    cluster_strengths = {}
+
+    # Count the number of points per cluster
+    cluster_counts = Counter(labels)
+
+    print("Points per cluster:")
+    for label, count in cluster_counts.items():
+        if label != -1:
+            cluster_strengths[label] = ClusterData(count, 0)
+
+    # 
+    z_values = weighted_attentions_with_locations[:, 2]
+
+    for cluster in unique_clusters:
+        cluster_points = z_values[labels == cluster]  # Get strength values for the cluster
+        
+        if cluster in cluster_strengths:
+            total_count = len(cluster_points)
+            counts = Counter(cluster_points)
+            probabilities = [count / total_count for count in counts.values()]
+            entropy = -sum(p * np.log2(p) for p in probabilities if p > 0)
+            max_entropy = np.log2(len(counts))
+            normalized_entropy = entropy / max_entropy
+            cluster_strengths[cluster].ave_strength = normalized_entropy
+
+    # Print average strength of each cluster
+    print("Entropy per Cluster:")
+    for cluster, data in cluster_strengths.items():
+        print(f"Cluster {cluster}: {data}")
+        
+    return cluster_strengths
+
+def calculate_token_entropy(token_list: list):
+    total_count = len(token_list)
+    counts = Counter(token_list)
     probabilities = [count / total_count for count in counts.values()]
     entropy = -sum(p * np.log2(p) for p in probabilities if p > 0)
     max_entropy = np.log2(len(counts))
@@ -406,7 +490,7 @@ def main():
         image = Image.open(requests.get(imagePrompt.image_url, stream=True).raw)
 
         # Get attention patches
-        demo_img, increase_scores_normalize = mechanism.get_attention_patches(image, imagePrompt.prompt, imagePrompt.prefix)
+        demo_img, increase_scores_normalize, token_probability = mechanism.get_attention_patches(image, imagePrompt.prompt, imagePrompt.prefix)
         
         # Save visualization
         mechanism.save_vis(demo_img, increase_scores_normalize, imagePrompt.prompt)
@@ -431,10 +515,14 @@ def main():
         # epsilon = 1.5 - eps should be >=1 since the minimum distance between 2 adjacent attentions is 1.
         # min_samples = 15
         db, _, _ = find_clusters(weighted_attentions_with_locations, 1.3, 15)
+        calculate_metrics(db, weighted_attentions_with_locations)
     
         # Calculate entropy.
         entropy = calculate_entropy(increase_scores_normalize)
+        token_entropy = calculate_token_entropy(token_probability)
         print(f"Attention Entropy: {entropy:.4f}")
+        print(f"Token Entropy: {token_entropy:.4f}")
+        cluster_entropy(db, weighted_attentions_with_locations)
 
 if __name__ == "__main__":
     main()
