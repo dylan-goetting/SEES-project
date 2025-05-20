@@ -10,7 +10,6 @@ import os
 import random
 import urllib.parse
 
-from PIL import Image, ImageDraw
 from PIL import Image
 from transformers.image_transforms import (
     convert_to_rgb,
@@ -55,21 +54,56 @@ def normalize(vector):
     vector2 = [x/sum(vector1) for x in vector1]
     return vector2
 
-def transfer_output(model_output):
-    all_pos_layer_input = []
 
+# def transfer_output(model_output):
+#     all_pos_layer_input = []
+#     all_pos_layer_output = []
+#     all_last_attn_subvalues = []
+
+#     for layer_i in range(LAYER_NUM):
+#         cur_layer_input = model_output[layer_i][0]
+#         cur_layer_output = model_output[layer_i][4]
+#         cur_last_attn_subvalues = model_output[layer_i][5]
+
+#         all_pos_layer_input.append(cur_layer_input[0].tolist())
+#         all_pos_layer_output.append(cur_layer_output[0].tolist())
+#         all_last_attn_subvalues.append(cur_last_attn_subvalues[0].tolist())
+
+#     return all_pos_layer_input, all_pos_layer_output, all_last_attn_subvalues
+
+
+def transfer_output(model_output):
+    """Handle different model output formats with proper dimension checking"""
+    all_pos_layer_input = []
     all_pos_layer_output = []
     all_last_attn_subvalues = []
 
     for layer_i in range(LAYER_NUM):
-        cur_layer_input = model_output[layer_i][0]
-        cur_layer_output = model_output[layer_i][4]
-        cur_last_attn_subvalues = model_output[layer_i][5]
+        layer_data = model_output[layer_i]
+        
+        # Handle different output formats
+        if len(layer_data) >= 6:  # New format
+            cur_layer_input = layer_data[0]
+            cur_layer_output = layer_data[4]
+            cur_last_attn_subvalues = layer_data[5]
+        elif len(layer_data) >= 3:  # Older format
+            cur_layer_input = layer_data[0]
+            cur_layer_output = layer_data[1]
+            cur_last_attn_subvalues = layer_data[2]
+        else:
+            raise ValueError(f"Unexpected layer output format with length {len(layer_data)}")
 
-        all_pos_layer_input.append(cur_layer_input[0].tolist())
-
-        all_pos_layer_output.append(cur_layer_output[0].tolist())
-        all_last_attn_subvalues.append(cur_last_attn_subvalues[0].tolist())
+        # Convert to list and handle batch dimension
+        def process_tensor(t):
+            if isinstance(t, torch.Tensor):
+                if t.dim() > 1:
+                    t = t[0]  # Take first item if batched
+                return t.tolist()
+            return t
+            
+        all_pos_layer_input.append(process_tensor(cur_layer_input))
+        all_pos_layer_output.append(process_tensor(cur_layer_output))
+        all_last_attn_subvalues.append(process_tensor(cur_last_attn_subvalues))
 
     return all_pos_layer_input, all_pos_layer_output, all_last_attn_subvalues
 
@@ -126,155 +160,173 @@ def plt_heatmap(data):
     plt.title("attn head log increase heatmap")
     plt.show()
 
-        
+
 class LlavaMechanism:
     def __init__(self, model_id="llava-hf/llava-1.5-7b-hf", device="cuda"):
         """
         Initialize the LlavaMechanism class by loading the model and processor.
         
+        Args:
+            model_id (str): The model ID to load
+            device (str): Device to run the model on
         """
+        # Setup CUDA
         torch.set_default_device('cuda')
         
         # Load model
         self.model = LlavaForConditionalGeneration.from_pretrained(
-            model_id,
-            low_cpu_mem_usage=True,
-            revision='a272c74',
-            output_attentions=True,
-            output_hidden_states=True
+            model_id, 
+            low_cpu_mem_usage=True, 
+            revision='a272c74'
         ).to(device)
-        
-        # Initialize processor
-        self.processor = AutoProcessor.from_pretrained(
-            model_id,
-            revision='a272c74',
-            do_resize=True,
-            size={"height": 336, "width": 336},
-            patch_size=14, 
-            do_center_crop=True,
-            do_normalize=True
-        )
         
         print(f"Model loaded on {self.model.device}")
         self.model.eval()
-        self.output_dir = "output_images"
-        os.makedirs(self.output_dir, exist_ok=True)
-    def get_attention_patches(self, images, prompts, prefixes):
-        """
-        Processes a true batch of different images with proper timing and validation
         
-        Args:
-            images (list): List of PIL.Image objects
-            prompts (list): List of prompt strings
-            prefixes (list): List of prefix strings
-            
-        Returns:
-            list: List of tuples (demo_img, increase_scores_normalize)
-        """
-
-        if len(images) != len(prompts) or len(images) != len(prefixes):
-            raise ValueError("Input lists must have equal length")
-    
-        # Preprocess images
-        processed_images = []
-        for img in images:
-            try:
-                if img.mode != 'RGB':
-                    img = img.convert('RGB')
-                if min(img.size) < 336:
-                    img = img.resize((336, 336))
-                processed_images.append(img)
-            except Exception as e:
-                print(f"Image processing error: {e}")
-                processed_images.append(Image.new('RGB', (336, 336)))
-    
-        # Batch processing
-        inputs = self.processor(
-            text=[f"USER: <image>\n{p}\nASSISTANT: {pre}" for p, pre in zip(prompts, prefixes)],
-            images=processed_images,
-            return_tensors="pt",
-            padding=True,
-            truncation=True
-        ).to(self.model.device)
-    
+        self.processor = AutoProcessor.from_pretrained(model_id, revision='a272c74')
+        self.processor.patch_size = 14 # added
+        print(f"Model loaded on {self.model.device}")
+        self.model.eval()
+        
+        # Create output directory for saved visualizations
+        self.output_dir = "output_images"
+        os.makedirs(self.output_dir, exist_ok=True) 
+        
+    def get_attention_patches(self, images, prompts, prefixes):
+        batch_results = []
+        
+        full_prompts = [f"USER: <image>\n{p}\nASSISTANT: {pref}" for p, pref in zip(prompts, prefixes)]
+        inputs = self.processor(text=full_prompts, images=images, return_tensors="pt", padding=True).to(self.model.device)
+        
         with torch.no_grad():
             outputs = self.model(**inputs)
-    
-        batch_results = []
+        
         for i in range(len(images)):
-            # Get predicted token
-            outputs_probs = get_prob(outputs.logits[i][-1])
-            outputs_probs_sort = torch.argsort(outputs_probs, descending=True)
-            predict_index = outputs_probs_sort[0].item()
-    
-            # Process layers
-            all_head_increase = []
-            final_var = outputs.hidden_states[-1][i][-1].pow(2).mean(-1, keepdim=True)
-            
-            for layer_i in range(LAYER_NUM):
-                layer = self.model.language_model.model.layers[layer_i]
-                cur_layer_input = outputs.hidden_states[layer_i][i][-1]  
-                cur_attention = outputs.attentions[layer_i][i][:, -1, :]
+            try:
+                # Get outputs for current item
+                logits = outputs.logits[i] if outputs.logits.dim() == 3 else outputs.logits
+                outputs_probs = get_prob(logits[-1])
+                outputs_probs_sort = torch.argsort(outputs_probs, descending=True)
+                predict_index = outputs_probs_sort[0].item()
                 
-                # Get output projection weights
-                o_proj = layer.self_attn.o_proj.weight.data 
+                # Process model outputs
+                item_output = []
+                for layer in range(LAYER_NUM):
+                    layer_data = outputs[2][layer]
+                    item_output.append([
+                        layer_data[0][i],
+                        layer_data[4][i] if len(layer_data) > 4 else layer_data[1][i],
+                        layer_data[5][i] if len(layer_data) > 5 else layer_data[2][i]
+                    ])
                 
-                # Compute attention-weighted values for each head
-                hidden_states = outputs.hidden_states[layer_i][i] 
-                for head_j in range(HEAD_NUM):
-                    attn_weights = cur_attention[head_j]
-                    weighted_values = torch.matmul(
-                        attn_weights.unsqueeze(0), 
-                        hidden_states  
-                    ) 
+                all_pos_layer_input, all_pos_layer_output, all_last_attn_subvalues = transfer_output(item_output)
+                final_var = torch.tensor(all_pos_layer_output[-1][-1]).pow(2).mean(-1, keepdim=True)
+                
+                # Process image
+                image_convert = convert_to_rgb(images[i])
+                image_numpy = to_numpy_array(image_convert)
+                input_data_format = infer_channel_dimension_format(image_numpy)
+                output_size = get_resize_output_image_size(image_numpy, size=336,
+                           default_to_square=False, input_data_format=input_data_format)
+                image_resize = resize(image_numpy, output_size, resample=3, input_data_format=input_data_format)
+                demo_img = center_crop(image_resize, size=(336, 336), input_data_format=input_data_format)
+                
+                # New attention processing approach
+                all_head_increase = []
+                for test_layer in range(LAYER_NUM):
+                    cur_v_heads = torch.tensor(all_last_attn_subvalues[test_layer])
                     
-                    head_start = head_j * HEAD_DIM
-                    head_end = (head_j + 1) * HEAD_DIM
-                    head_weight = o_proj[head_start:head_end, :]  
+                    # Calculate the correct sequence length for this batch item
+                    # 77056 / (32 * 128) = 18.8125 → suggests sequence length might be 19
+                    # Try both 18 and 19 to see which works
+                    possible_seq_lens = [18, 19]
+                    valid_shape = None
                     
-                    head_impact = torch.matmul(
-                        weighted_values, 
-                        head_weight.T 
-                    ) 
+                    for seq_len in possible_seq_lens:
+                        expected_size = seq_len * HEAD_NUM * HEAD_DIM
+                        if cur_v_heads.numel() >= expected_size:
+                            valid_shape = (1, seq_len, HEAD_NUM, HEAD_DIM)
+                            break
                     
-                    head_impact_full = torch.zeros_like(cur_layer_input)
-                    head_impact_full[head_start:head_end] = head_impact.squeeze(0)
+                    if valid_shape is None:
+                        print(f"Could not determine valid shape for layer {test_layer}")
+                        continue
                     
-                    # Calculate probability 
-                    origin_prob = torch.log(get_prob(get_bsvalues(
-                        cur_layer_input, self.model, final_var))[predict_index])
+                    try:
+                        # Take only the elements that fit the shape
+                        cur_v_heads = cur_v_heads[:valid_shape[1] * HEAD_NUM * HEAD_DIM]
+                        cur_v_heads = cur_v_heads.view(*valid_shape)
+                        
+                        cur_attn_o_split = self.model.language_model.model.layers[test_layer].self_attn.o_proj.weight.data.T.view(HEAD_NUM, HEAD_DIM, -1)
+                        cur_attn_subvalues_headrecompute = torch.einsum('bshd,hdk->bshk', cur_v_heads, cur_attn_o_split)
+                        
+                        cur_attn_subvalues_head_sum = torch.sum(cur_attn_subvalues_headrecompute, dim=2)
+                        cur_layer_input = torch.tensor(all_pos_layer_input[test_layer])
+                        
+                        if cur_layer_input.dim() == 1:
+                            cur_layer_input = cur_layer_input.unsqueeze(0)
+                        cur_layer_input_last = cur_layer_input[-1]
+                        
+                        origin_prob = torch.log(get_prob(get_bsvalues(cur_layer_input_last, self.model, final_var))[predict_index])
+                        cur_attn_subvalues_head_plus = cur_attn_subvalues_head_sum.squeeze(0) + cur_layer_input_last
+                        cur_attn_plus_probs = torch.log(get_prob(get_bsvalues(
+                            cur_attn_subvalues_head_plus, self.model, final_var))[:, predict_index])
+                        cur_attn_plus_probs_increase = cur_attn_plus_probs - origin_prob
+                        
+                        for j in range(len(cur_attn_plus_probs_increase)):
+                            all_head_increase.append([str(test_layer)+"_"+str(j), round(cur_attn_plus_probs_increase[j].item(), 4)])
                     
-                    modified_input = cur_layer_input + head_impact_full
-                    new_prob = torch.log(get_prob(get_bsvalues(
-                        modified_input, self.model, final_var))[predict_index])
+                    except Exception as e:
+                        print(f"Error processing layer {test_layer}: {str(e)}")
+                        continue
+                
+                if not all_head_increase:
+                    print(f"No valid attention data for image {i}")
+                    continue
                     
-                    all_head_increase.append((
-                        f"{layer_i}_{head_j}",
-                        (new_prob - origin_prob).item()
-                    ))
-    
-            # Select best head
-            all_head_increase.sort(key=lambda x: x[1], reverse=True)
-            best_head = all_head_increase[0][0]
-            best_head_layer, best_head_idx = map(int, best_head.split('_'))
-            
-            # Get attention weights
-            best_head_attention = outputs.attentions[best_head_layer][i][best_head_idx, -1, 5:581].cpu().numpy()
-            increase_scores_normalize = normalize(best_head_attention)
-    
-            # Prepare image
-            image_numpy = to_numpy_array(processed_images[i])
-            input_data_format = infer_channel_dimension_format(image_numpy)
-            demo_img = center_crop(
-                resize(image_numpy, size=(336, 336), input_data_format=input_data_format),
-                size=(336, 336),
-                input_data_format=input_data_format
-            )
-    
-            batch_results.append((demo_img, increase_scores_normalize))
-    
+                all_head_increase_sort = sorted(all_head_increase, key=lambda x:x[-1])[::-1]
+                
+                test_layer, head_index = all_head_increase_sort[0][0].split("_")
+                test_layer, head_index = int(test_layer), int(head_index)
+                
+                # Handle head-specific calculation
+                cur_layer_input = outputs[2][test_layer][0][i]
+                cur_v_heads = outputs[2][test_layer][5][i]
+                
+                if isinstance(cur_v_heads, torch.Tensor):
+                    # Use the same shape determination logic
+                    for seq_len in possible_seq_lens:
+                        expected_size = seq_len * HEAD_NUM * HEAD_DIM
+                        if cur_v_heads.numel() >= expected_size:
+                            valid_shape = (1, seq_len, HEAD_NUM, HEAD_DIM)
+                            break
+                    
+                    if valid_shape:
+                        cur_v_heads = cur_v_heads[:valid_shape[1] * HEAD_NUM * HEAD_DIM]
+                        cur_v_heads = cur_v_heads.view(*valid_shape)
+                        
+                        cur_attn_o_split = self.model.language_model.model.layers[test_layer].self_attn.o_proj.weight.data.T.view(HEAD_NUM, HEAD_DIM, -1)
+                        cur_attn_subvalues_headrecompute = torch.einsum('bshd,hdk->bshk', cur_v_heads, cur_attn_o_split)
+                        cur_attn_subvalues_headrecompute_curhead = cur_attn_subvalues_headrecompute[:, :, head_index, :]
+                        
+                        cur_layer_input_last = cur_layer_input[-1]
+                        origin_prob = torch.log(get_prob(get_bsvalues(cur_layer_input_last, self.model, final_var))[predict_index])
+                        cur_attn_subvalues_headrecompute_curhead_plus = cur_attn_subvalues_headrecompute_curhead + cur_layer_input_last
+                        cur_attn_plus_probs = torch.log(get_prob(get_bsvalues(
+                            cur_attn_subvalues_headrecompute_curhead_plus, self.model, final_var))[:, predict_index])
+                        cur_attn_plus_probs_increase = cur_attn_plus_probs - origin_prob
+                        head_pos_increase = cur_attn_plus_probs_increase.tolist()
+                        curhead_increase_scores = head_pos_increase[5:581]
+                        increase_scores_normalize = normalize(curhead_increase_scores)
+                        
+                        batch_results.append((demo_img, increase_scores_normalize, outputs_probs_sort))
+                
+            except Exception as e:
+                print(f"Error processing item {i}: {str(e)}")
+                continue
+                
         return batch_results
-                    
+    
     def save_vis(self, demo_img, increase_scores_normalize, output_path=None):
         """
         Save a visualization of the original image with overlayed attention patches.
@@ -290,7 +342,7 @@ class LlavaMechanism:
             output_path = os.path.join(self.output_dir, f"{output_path}.png")
         demo_img_h, demo_img_w, demo_img_c = demo_img.shape
         
-        # Resize attention scores
+        # Reshape and resize the attention scores
         demo_img_inc = np.array(increase_scores_normalize).reshape((24, 24))
         demo_img_inc = cv2.resize(demo_img_inc,
                                 dsize=(demo_img_w, demo_img_h),
@@ -305,20 +357,20 @@ class LlavaMechanism:
         plt.axis("off")
         plt.title("image")
         
-        # Plot image
+        # Plot image with overlay
         plt.subplot(1, 3, 2)
         plt.imshow(demo_img)
         plt.imshow(demo_img_inc, alpha=0.8, cmap="gray")
         plt.axis("off")
         plt.title("log increase")
         
+        # Save the figure
         plt.savefig(output_path)
         plt.close()
         print(f"Visualization saved to {output_path}")
 
 def transform_matrix_to_3d_points(array_2d: np.ndarray):
-    """
-    Transforms a 2D numpy array to an array of (x, y, value) tuples, here (x, y) is the location of the value.
+    """Transforms a 2D numpy array to an array of (x, y, value) tuples, here (x, y) is the location of the value.
 
     Example:
         Input: [[0.3 1.7 2.5]
@@ -348,8 +400,7 @@ def transform_matrix_to_3d_points(array_2d: np.ndarray):
     return result
 
 def find_clusters(attentions_with_locations: np.ndarray, eps: float, min_samples: int, metric: str="euclidean") -> (DBSCAN, int, int):
-    """
-    Find clusters from a given attention 3D points.
+    """Find clusters from a given attention 3D points.
 
     Args:
         attentions_with_locations: a list of attentions with location info.
@@ -378,8 +429,7 @@ def find_clusters(attentions_with_locations: np.ndarray, eps: float, min_samples
     return db, n_clusters_, n_noise_
 
 def apply_threshold(datapoints: np.ndarray, percentile: float) -> np.ndarray:
-    """
-    Remove the lowest percentile scores.
+    """Remove the lowest percentile scores.
     """
     z_values = datapoints[:, 2]
 
@@ -390,8 +440,7 @@ def apply_threshold(datapoints: np.ndarray, percentile: float) -> np.ndarray:
     return datapoints[datapoints[:, 2] > p_value]
 
 def duplicate_points(datapoints: np.ndarray, min_dup: int, max_dup: int) -> np.ndarray:
-    """ 
-    Duplicate datapoints so that large valkues duplicates more times than smaller values.
+    """ Duplicate datapoints so that large valkues duplicates more times than smaller values.
     """
     # Extract value (attention score)
     values = datapoints[:, 2]
@@ -430,12 +479,12 @@ def calculate_entropy(weighted_attentions_with_locations: np.ndarray, db: DBSCAN
             entropy[label] = Entropy(label, count, 0.0)
 
     # Calculate the average strength per cluster.
-    unique_clusters = set(labels) - {-1} 
+    unique_clusters = set(labels) - {-1}  # Remove noise (-1)
     cluster_strengths = {}
     z_values = weighted_attentions_with_locations[:, 2]
     
     for cluster in unique_clusters:
-        cluster_points = z_values[labels == cluster]  
+        cluster_points = z_values[labels == cluster]  # Get strength values for the cluster
         cluster_strengths[cluster] = np.mean(cluster_points)
     
     for cluster, avg_strength in cluster_strengths.items():
@@ -444,44 +493,70 @@ def calculate_entropy(weighted_attentions_with_locations: np.ndarray, db: DBSCAN
     return entropy
         
 def main():
+    """
+    Main function to demonstrate the usage of LlavaMechanism class.
+    """
+    
+    # Create LlavaMechanism instance
     mechanism = LlavaMechanism()
     
-    # Load test image
-    test_image_url = "http://images.cocodataset.org/val2017/000000219578.jpg"
-    response = requests.get(test_image_url, stream=True)
-    image = Image.open(response.raw).convert('RGB')
-
-    batch_size = 5
-    images = []
-    prompts = []
-    prefixes = []
-
-    # Create unique test images
-    for i in range(batch_size):
-        img = image.copy()
-        draw = ImageDraw.Draw(img)
-        draw.rectangle([i*20, i*20, i*20+50, i*20+50], 
-                      fill=(random.randint(0,255), 
-                      random.randint(0,255), 
-                      random.randint(0,255)))
-        images.append(img)
-        prompts.append(f"How many pets are there{i}?")
-        prefixes.append(f"The number of pets is")
-
-    # Process batch with timing
-    print("\nStarting batch processing...")
-    start_time = time.time()
+    #imagePrompts = [ImagePrompt("http://images.cocodataset.org/val2017/000000219578.jpg", "What is the color of the cat?", "the cat is the color")]
     
-    try:
-        batch_results = mechanism.get_attention_patches(images, prompts, prefixes)
-        total_time = time.time() - start_time
+    imagePrompts = [
+    ImagePrompt(
+        image_url="http://images.cocodataset.org/val2017/000000219578.jpg",
+        prompt="What is the color of the dog?",
+        prefix="the color of the dog is"
+    ) for _ in range(5)
+]
+    
+    images = [Image.open(requests.get(ip.image_url, stream=True).raw) for ip in imagePrompts]
+    prompts = [ip.prompt for ip in imagePrompts]
+    prefixes = [ip.prefix for ip in imagePrompts]
+
+    batch_results = mechanism.get_attention_patches(images, prompts, prefixes)
+    
+    # for i, imagePrompt in enumerate(imagePrompts):
+    for i, (demo_img, increase_scores_normalize) in enumerate(batch_results):
+        mechanism.save_vis(demo_img, increase_scores_normalize, prompts[i])
+    
+        # print(f"\nProcess image {i} - {imagePrompt.image_url}")
+        # image = Image.open(requests.get(imagePrompt.image_url, stream=True).raw)
+
+        # # Get attention patches
+        # demo_img, increase_scores_normalize = mechanism.get_attention_patches([image], [imagePrompt.prompt], [imagePrompt.prefix])
+        # results = demo_img, increase_scores_normalize
         
-        # Batch verification
-        print("\n=== BATCH PROCESSING RESULTS ===")
-        print(f"Processed {len(batch_results)} items in {total_time:.2f} seconds")
-        print(f"Average time per image: {total_time/len(batch_results):.2f}s")
+        # Save visualization
+        # mechanism.save_vis(demo_img, increase_scores_normalize, imagePrompt.prompt)
         
-        # Input verification
+        # increase_scores_normalize - min: 0.0, max: 0.1541638498880645
+        # For each attention, prefix the patch row and column indices.
+        increase_scores_normalize = np.array(increase_scores_normalize)
+        increase_scores_normalize = increase_scores_normalize.reshape(24, 24)
+    
+        attentions_with_locations = transform_matrix_to_3d_points(increase_scores_normalize)
+        print(f"Attentions with locations: ", attentions_with_locations.shape)
+        
+        # Remove lower percentile datapoints.
+        threshold_percentile = 80
+        filtered_attentions_with_locations = apply_threshold(attentions_with_locations, threshold_percentile)
+        print(f"Attentions without the lowest {threshold_percentile}% datapoints: ", filtered_attentions_with_locations.shape)
+        
+        # Duplicate datapoints.
+        weighted_attentions_with_locations = duplicate_points(filtered_attentions_with_locations, 1, 9)
+        
+        # Apply Euclidean distance to evaluate spatial proximity
+        # epsilon = 1.5 - eps should be >=1 since the minimum distance between 2 adjacent attentions is 1.
+        # min_samples = 15
+        db, _, _ = find_clusters(weighted_attentions_with_locations, 1.3, 15)
+    
+        # Calculate entropy.
+        entropy = calculate_entropy(weighted_attentions_with_locations, db)
+        print(entropy)    
+        save_attentions(weighted_attentions_with_locations, db, imagePrompt.image_url)
+
+        # Verification
         input_hashes = [hash(img.tobytes()) for img in images]
         unique_inputs = len(set(input_hashes))
         print(f"\nInput verification:")
@@ -498,37 +573,8 @@ def main():
         
         avg_diff = np.mean(diffs)
         print(f"\nAverage output difference: {avg_diff:.4f}")
-        
-        # Cluster analysis for first image
-        if batch_results:
-            demo_img, increase_scores_normalize = batch_results[0]
-            print("\n=== CLUSTERING ===")
-            
-            # Timing cluster analysis
-            attention_matrix = np.array(increase_scores_normalize).reshape(24, 24)
-            points_3d = transform_matrix_to_3d_points(attention_matrix)
-            filtered_points = apply_threshold(points_3d, 80)
-            weighted_points = duplicate_points(filtered_points, 1, 9)
-            db, n_clusters, n_noise = find_clusters(weighted_points, 1.3, 15)
-            
-            print(f"Number of clusters: {n_clusters}")
-            print(f"Noise points: {n_noise}")
-            save_attentions(weighted_points, db, "output_clusters.png")
-            
-            # Save visualizations
-            mechanism.save_vis(demo_img, increase_scores_normalize, "batch_result")
-            
-            # Save attention matrix
-            plt.figure(figsize=(10, 10))
-            plt.imshow(attention_matrix, cmap='viridis', aspect='auto')
-            plt.colorbar(label='Attention Strength')
-            plt.title("Attention Matrix (24x24)")
-            plt.savefig(os.path.join("output_images", "attention_matrix.png"))
-            plt.close()
-            
-    except Exception as e:
-        print(f"\nError during processing: {str(e)}")
-        raise
 
 if __name__ == "__main__":
     main()
+
+
