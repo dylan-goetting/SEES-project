@@ -193,140 +193,106 @@ class LlavaMechanism:
         os.makedirs(self.output_dir, exist_ok=True) 
         
     def get_attention_patches(self, images, prompts, prefixes):
-        batch_results = []
-        
-        full_prompts = [f"USER: <image>\n{p}\nASSISTANT: {pref}" for p, pref in zip(prompts, prefixes)]
-        inputs = self.processor(text=full_prompts, images=images, return_tensors="pt", padding=True).to(self.model.device)
-        
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-        
-        for i in range(len(images)):
-            try:
-                # Get outputs for current item
-                logits = outputs.logits[i] if outputs.logits.dim() == 3 else outputs.logits
-                outputs_probs = get_prob(logits[-1])
+            """
+            Get attention patches for an image with a specific prompt.
+            
+            Args:
+                images (PIL.Image): Input images
+                prompts (str): Prompt texts
+                prefixes (str): Prefix texts after ASSISTANT tag
+                
+            Returns:
+                tuple: (demo_img, increase_scores_normalize)
+            """
+            batch_results = []
+            t = time.time()
+            
+            # Process input
+            full_prompts = [f"USER: <image>\n{p}\nASSISTANT: {pref}" for p, pref in zip(prompts, prefixes)]
+            inputs = self.processor(text=full_prompts, images=images, return_tensors="pt", padding=True).to(self.model.device)
+
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+            print(f'Finished inference time {time.time() - t}')
+
+            for i in range(len(prompts)):
+                # Get output probabilities
+                logits_i = outputs["logits"][i]
+                outputs_probs = get_prob(logits_i[-1])
                 outputs_probs_sort = torch.argsort(outputs_probs, descending=True)
-                predict_index = outputs_probs_sort[0].item()
+                print([self.processor.decode(x) for x in outputs_probs_sort[:10]])
+                print(outputs_probs_sort[:10].tolist())
                 
                 # Process model outputs
-                item_output = []
-                for layer in range(LAYER_NUM):
-                    layer_data = outputs[2][layer]
-                    item_output.append([
-                        layer_data[0][i],
-                        layer_data[4][i] if len(layer_data) > 4 else layer_data[1][i],
-                        layer_data[5][i] if len(layer_data) > 5 else layer_data[2][i]
-                    ])
-                
-                all_pos_layer_input, all_pos_layer_output, all_last_attn_subvalues = transfer_output(item_output)
-                final_var = torch.tensor(all_pos_layer_output[-1][-1]).pow(2).mean(-1, keepdim=True)
+                transfer_output_i = transfer_output([
+                    tuple(tensor[i:i+1] for tensor in layer) for layer in outputs[2]
+                ])
+                all_pos_layer_input_i, all_pos_layer_output_i, all_last_attn_subvalues_i = transfer_output_i
+                print(f'Finished transfer output time {time.time() - t}')
+                final_var = torch.tensor(all_pos_layer_output_i[-1][-1]).pow(2).mean(-1, keepdim=True)
                 
                 # Process image
-                image_convert = convert_to_rgb(images[i])
+                resample = 3
+                crop_size = {"height": 336, "width": 336}
+                image_i = images[i]
+                image_convert = convert_to_rgb(image_i)
                 image_numpy = to_numpy_array(image_convert)
                 input_data_format = infer_channel_dimension_format(image_numpy)
                 output_size = get_resize_output_image_size(image_numpy, size=336,
-                           default_to_square=False, input_data_format=input_data_format)
-                image_resize = resize(image_numpy, output_size, resample=3, input_data_format=input_data_format)
-                demo_img = center_crop(image_resize, size=(336, 336), input_data_format=input_data_format)
+                             default_to_square=False, input_data_format=input_data_format)
+                image_resize = resize(image_numpy, output_size, resample=resample, input_data_format=input_data_format)
+                image_center_crop = center_crop(image_resize, size=(crop_size["height"], crop_size["width"]), input_data_format=input_data_format)
                 
-                # New attention processing approach
+                demo_img = image_center_crop
+                
+                predict_index = outputs_probs_sort[0].item()
+                print(predict_index, self.processor.decode(predict_index))
+
+                
+                # Calculate head-level increase
                 all_head_increase = []
                 for test_layer in range(LAYER_NUM):
-                    cur_v_heads = torch.tensor(all_last_attn_subvalues[test_layer])
-                    
-                    # Calculate the correct sequence length for this batch item
-                    # 77056 / (32 * 128) = 18.8125 → suggests sequence length might be 19
-                    # Try both 18 and 19 to see which works
-                    possible_seq_lens = [18, 19]
-                    valid_shape = None
-                    
-                    for seq_len in possible_seq_lens:
-                        expected_size = seq_len * HEAD_NUM * HEAD_DIM
-                        if cur_v_heads.numel() >= expected_size:
-                            valid_shape = (1, seq_len, HEAD_NUM, HEAD_DIM)
-                            break
-                    
-                    if valid_shape is None:
-                        print(f"Could not determine valid shape for layer {test_layer}")
-                        continue
-                    
-                    try:
-                        # Take only the elements that fit the shape
-                        cur_v_heads = cur_v_heads[:valid_shape[1] * HEAD_NUM * HEAD_DIM]
-                        cur_v_heads = cur_v_heads.view(*valid_shape)
-                        
-                        cur_attn_o_split = self.model.language_model.model.layers[test_layer].self_attn.o_proj.weight.data.T.view(HEAD_NUM, HEAD_DIM, -1)
-                        cur_attn_subvalues_headrecompute = torch.einsum('bshd,hdk->bshk', cur_v_heads, cur_attn_o_split)
-                        
-                        cur_attn_subvalues_head_sum = torch.sum(cur_attn_subvalues_headrecompute, dim=2)
-                        cur_layer_input = torch.tensor(all_pos_layer_input[test_layer])
-                        
-                        if cur_layer_input.dim() == 1:
-                            cur_layer_input = cur_layer_input.unsqueeze(0)
-                        cur_layer_input_last = cur_layer_input[-1]
-                        
-                        origin_prob = torch.log(get_prob(get_bsvalues(cur_layer_input_last, self.model, final_var))[predict_index])
-                        cur_attn_subvalues_head_plus = cur_attn_subvalues_head_sum.squeeze(0) + cur_layer_input_last
-                        cur_attn_plus_probs = torch.log(get_prob(get_bsvalues(
+                    cur_layer_input = torch.tensor(all_pos_layer_input_i[test_layer])
+                    cur_v_heads = torch.tensor(all_last_attn_subvalues_i[test_layer])
+                    cur_attn_o_split = self.model.language_model.model.layers[test_layer].self_attn.o_proj.weight.data.T.view(HEAD_NUM, HEAD_DIM, -1)
+                    cur_attn_subvalues_headrecompute = torch.bmm(cur_v_heads, cur_attn_o_split).permute(1, 0, 2)
+                    cur_attn_subvalues_head_sum = torch.sum(cur_attn_subvalues_headrecompute, 0)
+                    cur_layer_input_last = cur_layer_input[-1]
+                    origin_prob = torch.log(get_prob(get_bsvalues(cur_layer_input_last, self.model, final_var))[predict_index])
+                    cur_attn_subvalues_head_plus = cur_attn_subvalues_head_sum + cur_layer_input_last
+                    cur_attn_plus_probs = torch.log(get_prob(get_bsvalues(
                             cur_attn_subvalues_head_plus, self.model, final_var))[:, predict_index])
-                        cur_attn_plus_probs_increase = cur_attn_plus_probs - origin_prob
-                        
-                        for j in range(len(cur_attn_plus_probs_increase)):
-                            all_head_increase.append([str(test_layer)+"_"+str(j), round(cur_attn_plus_probs_increase[j].item(), 4)])
-                    
-                    except Exception as e:
-                        print(f"Error processing layer {test_layer}: {str(e)}")
-                        continue
+                    cur_attn_plus_probs_increase = cur_attn_plus_probs - origin_prob
+                    for i in range(len(cur_attn_plus_probs_increase)):
+                        all_head_increase.append([str(test_layer)+"_"+str(i), round(cur_attn_plus_probs_increase[i].item(), 4)])
+                print(f'Finished head-level increase time {time.time() - t}')
                 
-                if not all_head_increase:
-                    print(f"No valid attention data for image {i}")
-                    continue
-                    
                 all_head_increase_sort = sorted(all_head_increase, key=lambda x:x[-1])[::-1]
                 
+                # Get the top head and calculate position increase
                 test_layer, head_index = all_head_increase_sort[0][0].split("_")
                 test_layer, head_index = int(test_layer), int(head_index)
+                cur_layer_input = outputs[2][test_layer][0][0]
+                cur_v_heads = outputs[2][test_layer][5][0]
+                cur_attn_o_split = self.model.language_model.model.layers[test_layer].self_attn.o_proj.weight.data.T.view(HEAD_NUM, HEAD_DIM, -1)
+                cur_attn_subvalues_headrecompute = torch.bmm(cur_v_heads, cur_attn_o_split).permute(1, 0, 2)
+                cur_attn_subvalues_headrecompute_curhead = cur_attn_subvalues_headrecompute[:, head_index, :]
+                cur_layer_input_last = cur_layer_input[-1]
+                origin_prob = torch.log(get_prob(get_bsvalues(
+                    cur_layer_input_last, self.model, final_var))[predict_index])
+                cur_attn_subvalues_headrecompute_curhead_plus = cur_attn_subvalues_headrecompute_curhead + cur_layer_input_last
+                cur_attn_plus_probs = torch.log(get_prob(get_bsvalues(
+                    cur_attn_subvalues_headrecompute_curhead_plus, self.model, final_var))[:, predict_index])
+                cur_attn_plus_probs_increase = cur_attn_plus_probs - origin_prob
+                head_pos_increase = cur_attn_plus_probs_increase.tolist()
+                curhead_increase_scores = head_pos_increase[5:581]
+                increase_scores_normalize = normalize(curhead_increase_scores)
+                print(f'Finished getting patches time {time.time() - t}')
+
+                batch_results.append((demo_img, increase_scores_normalize, outputs_probs_sort))
                 
-                # Handle head-specific calculation
-                cur_layer_input = outputs[2][test_layer][0][i]
-                cur_v_heads = outputs[2][test_layer][5][i]
-                
-                if isinstance(cur_v_heads, torch.Tensor):
-                    # Use the same shape determination logic
-                    for seq_len in possible_seq_lens:
-                        expected_size = seq_len * HEAD_NUM * HEAD_DIM
-                        if cur_v_heads.numel() >= expected_size:
-                            valid_shape = (1, seq_len, HEAD_NUM, HEAD_DIM)
-                            break
-                    
-                    if valid_shape:
-                        cur_v_heads = cur_v_heads[:valid_shape[1] * HEAD_NUM * HEAD_DIM]
-                        cur_v_heads = cur_v_heads.view(*valid_shape)
-                        
-                        cur_attn_o_split = self.model.language_model.model.layers[test_layer].self_attn.o_proj.weight.data.T.view(HEAD_NUM, HEAD_DIM, -1)
-                        cur_attn_subvalues_headrecompute = torch.einsum('bshd,hdk->bshk', cur_v_heads, cur_attn_o_split)
-                        cur_attn_subvalues_headrecompute_curhead = cur_attn_subvalues_headrecompute[:, :, head_index, :]
-                        
-                        cur_layer_input_last = cur_layer_input[-1]
-                        origin_prob = torch.log(get_prob(get_bsvalues(cur_layer_input_last, self.model, final_var))[predict_index])
-                        cur_attn_subvalues_headrecompute_curhead_plus = cur_attn_subvalues_headrecompute_curhead + cur_layer_input_last
-                        cur_attn_plus_probs = torch.log(get_prob(get_bsvalues(
-                            cur_attn_subvalues_headrecompute_curhead_plus, self.model, final_var))[:, predict_index])
-                        cur_attn_plus_probs_increase = cur_attn_plus_probs - origin_prob
-                        head_pos_increase = cur_attn_plus_probs_increase.tolist()
-                        curhead_increase_scores = head_pos_increase[5:581]
-                        increase_scores_normalize = normalize(curhead_increase_scores)
-                        
-                        batch_results.append((demo_img, increase_scores_normalize, outputs_probs_sort))
-                
-            except Exception as e:
-                print(f"Error processing item {i}: {str(e)}")
-                continue
-                
-        return batch_results
-    
+            return batch_results
+        
     def save_vis(self, demo_img, increase_scores_normalize, output_path=None):
         """
         Save a visualization of the original image with overlayed attention patches.
@@ -516,19 +482,17 @@ def main():
 
     batch_results = mechanism.get_attention_patches(images, prompts, prefixes)
     
-    # for i, imagePrompt in enumerate(imagePrompts):
-    for i, (demo_img, increase_scores_normalize) in enumerate(batch_results):
-        mechanism.save_vis(demo_img, increase_scores_normalize, prompts[i])
-    
-        # print(f"\nProcess image {i} - {imagePrompt.image_url}")
-        # image = Image.open(requests.get(imagePrompt.image_url, stream=True).raw)
+    for i, (demo_img, increase_scores_normalize, token_probability) in enumerate(batch_results):
+        prompt = prompts[i]
+        image_url = imagePrompts[i].image_url
 
-        # # Get attention patches
-        # demo_img, increase_scores_normalize = mechanism.get_attention_patches([image], [imagePrompt.prompt], [imagePrompt.prefix])
-        # results = demo_img, increase_scores_normalize
-        
-        # Save visualization
-        # mechanism.save_vis(demo_img, increase_scores_normalize, imagePrompt.prompt)
+        mechanism.save_vis(demo_img, increase_scores_normalize, prompt)
+    
+        print(f"\nProcess image {i} - {imagePrompt.image_url}")
+        image = Image.open(requests.get(imagePrompt.image_url, stream=True).raw)
+
+        # Get attention patches
+        demo_img, increase_scores_normalize, token_probability = mechanism.get_attention_patches(image, imagePrompt.prompt, imagePrompt.prefix)
         
         # increase_scores_normalize - min: 0.0, max: 0.1541638498880645
         # For each attention, prefix the patch row and column indices.
@@ -550,31 +514,14 @@ def main():
         # epsilon = 1.5 - eps should be >=1 since the minimum distance between 2 adjacent attentions is 1.
         # min_samples = 15
         db, _, _ = find_clusters(weighted_attentions_with_locations, 1.3, 15)
+        calculate_metrics(db, weighted_attentions_with_locations)
     
         # Calculate entropy.
-        entropy = calculate_entropy(weighted_attentions_with_locations, db)
-        print(entropy)    
-        save_attentions(weighted_attentions_with_locations, db, imagePrompt.image_url)
-
-        # Verification
-        input_hashes = [hash(img.tobytes()) for img in images]
-        unique_inputs = len(set(input_hashes))
-        print(f"\nInput verification:")
-        print(f"Unique inputs: {unique_inputs}/{batch_size} {'✅' if unique_inputs == batch_size else '❌'}")
-        
-        # Output verification
-        first_scores = np.array(batch_results[0][1])
-        diffs = []
-        for i, (img, scores) in enumerate(batch_results):
-            diff = np.max(np.abs(np.array(scores) - first_scores))
-            diffs.append(diff)
-            status = "✅" if diff > 0.01 else "❌ (possible duplicate)"
-            print(f"Result {i+1} vs first - Max diff: {diff:.4f} {status}")
-        
-        avg_diff = np.mean(diffs)
-        print(f"\nAverage output difference: {avg_diff:.4f}")
+        entropy = calculate_entropy(increase_scores_normalize)
+        token_entropy = calculate_token_entropy(token_probability)
+        print(f"Attention Entropy: {entropy:.4f}")
+        print(f"Token Entropy: {token_entropy:.4f}")
+        cluster_entropy(db, weighted_attentions_with_locations)
 
 if __name__ == "__main__":
     main()
-
-
