@@ -55,21 +55,21 @@ def normalize(vector):
     return vector2
 
 
-# def transfer_output(model_output):
-#     all_pos_layer_input = []
-#     all_pos_layer_output = []
-#     all_last_attn_subvalues = []
+def transfer_output(model_output):
+    all_pos_layer_input = []
+    all_pos_layer_output = []
+    all_last_attn_subvalues = []
 
-#     for layer_i in range(LAYER_NUM):
-#         cur_layer_input = model_output[layer_i][0]
-#         cur_layer_output = model_output[layer_i][4]
-#         cur_last_attn_subvalues = model_output[layer_i][5]
+    for layer_i in range(LAYER_NUM):
+        cur_layer_input = model_output[layer_i][0]
+        cur_layer_output = model_output[layer_i][4]
+        cur_last_attn_subvalues = model_output[layer_i][5]
 
-#         all_pos_layer_input.append(cur_layer_input[0].tolist())
-#         all_pos_layer_output.append(cur_layer_output[0].tolist())
-#         all_last_attn_subvalues.append(cur_last_attn_subvalues[0].tolist())
+        all_pos_layer_input.append(cur_layer_input[0].tolist())
+        all_pos_layer_output.append(cur_layer_output[0].tolist())
+        all_last_attn_subvalues.append(cur_last_attn_subvalues[0].tolist())
 
-#     return all_pos_layer_input, all_pos_layer_output, all_last_attn_subvalues
+    return all_pos_layer_input, all_pos_layer_output, all_last_attn_subvalues
 
 
 def transfer_output(model_output):
