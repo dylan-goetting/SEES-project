@@ -37,14 +37,36 @@ LAYER_NUM = 32
 HEAD_NUM = 32
 HEAD_DIM = 128
 HIDDEN_DIM = HEAD_NUM * HEAD_DIM
-
+# Saad edited-----------------------------------------------------------------------------------------------------------------------------------------
 @dataclass
+class PromptEntry:
+    question  : str
+    prefix    : str
+    prompt    : str
+    image_url : str
+
+def load_prompts(csv_path: str = "results.csv") -> List[PromptEntry]:
+    entries: List[PromptEntry] = []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            entries.append(PromptEntry(
+                question  = row["question"],
+                prefix    = row["prefix"],
+                prompt    = row["prompt"],
+                image_url = row["image_url"],
+            ))
+    print(f"✅ Loaded {len(entries)} prompts from {csv_path}")
+    return entries
+#----------------------------------------------------------------------------------------------------------------------------------
+'''
+# class ImagePrompt has been commented out
 class ImagePrompt:
     image_url: str
     prompt: str
     prefix: str
-
-@dataclass
+'''
+@dataclass 
 class Entropy:
     cluster: int
     count_points: int
@@ -467,86 +489,59 @@ class ResultEntry:
                 f"pred={self.model_answer!r})")
 # -------------------------------------------------------------------
 
-# -------------------------------------------------------------------
-# 2) Loader for results.csv
-def load_results(csv_path: str = "results.csv") -> List[ResultEntry]:
-    entries: List[ResultEntry] = []
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            try:
-                tokens = json.loads(row["top_4_tokens"])
-            except json.JSONDecodeError:
-                tokens = []
-            entries.append(ResultEntry(
-                row["question_type"],
-                row["question"],
-                row["ground_truth"],
-                [t.strip() for t in tokens],
-                row["model_answer"],
-            ))
-    print(f"Loaded {len(entries)} entries from {csv_path}")
-    return entries
-# -------------------------------------------------------------------
 
-# -------------------------------------------------------------------
-# 3) Your existing imports and LlavaMechanism go here
-#    import torch, PIL, transformers, etc.
-#    class LlavaMechanism: ...
-# -------------------------------------------------------------------
 
 def main():
-    # 1) Load your CSV into Python objects
-    results = load_results("results.csv")
-
-    # 2) Instantiate your model/mechanism
+    prompts   = load_prompts("results.csv")
     mechanism = LlavaMechanism()
 
-    # 3) Iterate over every entry (formerly imagePrompts)
-    for i, entry in enumerate(results, start=1):
-        print(f"\n[{i}/{len(results)}] {entry.question_type}")
-        print(f"  Q:             {entry.question}")
-        print(f"  Ground truth:  {entry.ground_truth}")
-        print(f"  Model answer:  {entry.model_answer}")
-        print(f"  Top‑4 tokens:  {entry.top_4_tokens}")
+    for i, entry in enumerate(prompts, start=1):
+        print(f"\n[{i}/{len(prompts)}]")
+        print(f"  Q     : {entry.question}")
+        print(f"  Prefix: {entry.prefix}")
+        print(f"  Prompt: {entry.prompt}")
+        print(f"  URL   : {entry.image_url}")
 
-    print(f"\nProcess image {i} - {imagePrompt.image_url}")
-    image = Image.open(requests.get(imagePrompt.image_url, stream=True).raw)
+        # 1) Fetch image
+        image = Image.open(requests.get(entry.image_url, stream=True).raw)
 
-    # Get attention patches
-    demo_img, increase_scores_normalize = mechanism.get_attention_patches(image, imagePrompt.prompt, imagePrompt.prefix)
-        
-    # Save visualization
-    mechanism.save_vis(demo_img, increase_scores_normalize, imagePrompt.prompt)
-        
-    # increase_scores_normalize - min: 0.0, max: 0.1541638498880645
-    # For each attention, prefix the patch row and column indices.
-    increase_scores_normalize = np.array(increase_scores_normalize)
-    increase_scores_normalize = increase_scores_normalize.reshape(24, 24)
-    
-    attentions_with_locations = transform_matrix_to_3d_points(increase_scores_normalize)
-    print(f"Attentions with locations: ", attentions_with_locations.shape)
-        
-    # Remove lower percentile datapoints.
-    threshold_percentile = 80
-    filtered_attentions_with_locations = apply_threshold(attentions_with_locations, threshold_percentile)
-    print(f"Attentions without the lowest {threshold_percentile}% datapoints: ", filtered_attentions_with_locations.shape)
-        
-    # Duplicate datapoints.
-    weighted_attentions_with_locations = duplicate_points(filtered_attentions_with_locations, 1, 9)
-        
-    # Apply Euclidean distance to evaluate spatial proximity
-    # epsilon = 1.5 - eps should be >=1 since the minimum distance between 2 adjacent attentions is 1.
-    # min_samples = 15
-    db, _, _ = find_clusters(weighted_attentions_with_locations, 1.3, 15)
-    
-    # Calculate entropy.
-    entropy = calculate_entropy(increase_scores_normalize)
-    token_entropy = calculate_token_entropy(token_probability)
-    print(f"Attention Entropy: {entropy:.4f}")
-    print(f"Token Entropy: {token_entropy:.4f}")
-    cluster_entropy(db)
-    save_attentions(weighted_attentions_with_locations, db, imagePrompt.image_url)
+        # 2) Run attention-patch inference
+        demo_img, inc_scores = mechanism.get_attention_patches(
+            image, entry.prompt, entry.prefix
+        )
+
+        # 3) Save the overlay
+        mechanism.save_vis(demo_img, inc_scores, output_path=f"vis_{i}")
+
+        # ←—— POST-PROCESSING MUST BE INSIDE THE LOOP —→
+
+        # Convert your inc_scores to a 24×24 array
+        increase_scores_normalize = np.array(inc_scores).reshape(24, 24)
+
+        # Get (x,y,value) triplets
+        attentions_with_locations = transform_matrix_to_3d_points(increase_scores_normalize)
+        print(f"Attentions with locations: {attentions_with_locations.shape}")
+
+        # Threshold
+        threshold_percentile = 80
+        filtered = apply_threshold(attentions_with_locations, threshold_percentile)
+        print(f"After threshold: {filtered.shape}")
+
+        # Duplicate
+        weighted = duplicate_points(filtered, min_dup=1, max_dup=9)
+
+        # Cluster
+        db, _, _ = find_clusters(weighted, eps=1.3, min_samples=15)
+
+        # Entropy
+        entropy = calculate_entropy(increase_scores_normalize)
+        token_entropy = calculate_token_entropy(mechanism.token_probability)
+        print(f"Attention Entropy: {entropy:.4f}")
+        print(f"Token Entropy    : {token_entropy:.4f}")
+        cluster_entropy(db)
+
+        # Save final scatter overlay
+        save_attentions(weighted, db, entry.image_url)
 
 if __name__ == "__main__":
     main()
