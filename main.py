@@ -9,6 +9,45 @@ import argparse
 import os
 import random
 import urllib.parse
+from dataclasses import dataclass
+
+
+@dataclass
+class Token:
+    name: str
+    probability: float
+        
+@dataclass
+class Cluster:
+    id: int
+    points: list
+    entropy: float
+    strength: list
+    average_strength: float
+   
+
+@dataclass
+class Entropy:
+    token: float
+    general: float
+        
+@dataclass
+class Result:
+    filename: str
+    tokens: [Token]
+    clusters: [Cluster]
+    entropy: Entropy
+        
+result = Result(
+    filename = "",
+    tokens = [],
+    clusters = [],
+    entropy = Entropy(
+        token = 0,
+        general = 0
+    ),
+)
+
 
 from PIL import Image
 from transformers.image_transforms import (
@@ -42,11 +81,11 @@ class ImagePrompt:
     prompt: str
     prefix: str
 
-@dataclass
-class Entropy:
-    cluster: int
-    count_points: int
-    average_strength: float
+#@dataclass
+#class Entropy:
+#    cluster: int
+#    count_points: int
+#    average_strength: float
 
 def normalize(vector):
     max_value = max(vector)
@@ -178,7 +217,8 @@ class LlavaMechanism:
         # Get output probabilities
         outputs_probs = get_prob(outputs["logits"][0][-1])
         outputs_probs_sort = torch.argsort(outputs_probs, descending=True)
-        print([self.processor.decode(x) for x in outputs_probs_sort[:10]])
+        token_things = [self.processor.decode(x) for x in outputs_probs_sort[:10]]
+        print(token_things)
         print(outputs_probs_sort[:10].tolist())
         
         # Process model outputs
@@ -242,7 +282,7 @@ class LlavaMechanism:
         increase_scores_normalize = normalize(curhead_increase_scores)
         print(f'Finished getting patches time {time.time() - t}')
         
-        return demo_img, increase_scores_normalize, outputs_probs_sort
+        return demo_img, increase_scores_normalize, outputs_probs_sort, token_things
     
     def save_vis(self, demo_img, increase_scores_normalize, output_path=None):
         """
@@ -395,23 +435,34 @@ def calculate_metrics(db: DBSCAN, weighted_attentions_with_locations):
     cluster_strengths = {}
 
     # Count the number of points per cluster
-#    cluster_counts = Counter(labels)
+    cluster_counts = Counter(labels)
 
-#    print("Points per cluster:")
-#    for label, count in cluster_counts.items():
-#        if label != -1:
-#            cluster_strengths[label] = ClusterData(count, 0)
+    print("Points per cluster:")
+    for label, count in cluster_counts.items():
+        if label != -1:
+            result.clusters.append(Cluster(
+                id = label,
+                points = count,
+                entropy = [],
+                strength = [],
+                average_strength = 0,
+            ))
 
     # 
     z_values = weighted_attentions_with_locations[:, 2]
 
     for cluster in unique_clusters:
-        cluster_points = z_values[labels == cluster]  # Get strength values for the cluster
+        strengths = z_values[labels == cluster]  # Get strength values for the cluster
+
+        for c in result.clusters:
+            if c.id == cluster:
+                c.strength = strengths
+                c.average_strength = np.mean(strengths)
 
         if cluster in cluster_strengths:
-            cluster_strengths[cluster].ave_strength = np.mean(cluster_points)
+            cluster_strengths[cluster].ave_strength = np.mean(strengths)
         else:
-            cluster_strengths[cluster] = ClusterData(0, np.mean(cluster_points))
+            cluster_strengths[cluster] = ClusterData(0, np.mean(strengths))
 
     # Print average strength of each cluster
     print("Average Strength and Number of Points per Cluster:")
@@ -481,7 +532,52 @@ def main():
         image = Image.open(requests.get(imagePrompt.image_url, stream=True).raw)
 
         # Get attention patches
-        demo_img, increase_scores_normalize, token_probability = mechanism.get_attention_patches(image, imagePrompt.prompt, imagePrompt.prefix)
+        demo_img, increase_scores_normalize, token_probability, outputs = mechanism.get_attention_patches(image, imagePrompt.prompt, imagePrompt.prefix)
+        
+        print(outputs)
+
+        result.tokens = [
+            Token(
+                name = outputs[0],
+                probability = token_probability[0],
+            ),
+            Token(
+                name = outputs[1],
+                probability = token_probability[1],
+            ),
+            Token(
+                name = outputs[2],
+                probability = token_probability[2],
+            ),
+            Token(
+                name = outputs[3],
+                probability = token_probability[3],
+            ),
+            Token(
+                name = outputs[4],
+                probability = token_probability[4],
+            ),
+            Token(
+                name = outputs[5],
+                probability = token_probability[5],
+            ),
+            Token(
+                name = outputs[6],
+                probability = token_probability[6],
+            ),
+            Token(
+                name = outputs[7],
+                probability = token_probability[7],
+            ),
+            Token(
+                name = outputs[8],
+                probability = token_probability[8],
+            ),
+            Token(
+                name = outputs[9],
+                probability = token_probability[9],
+            ),
+        ]
         
         # Save visualization
         mechanism.save_vis(demo_img, increase_scores_normalize, imagePrompt.prompt)
@@ -511,9 +607,15 @@ def main():
         # Calculate entropy.
         entropy = calculate_entropy(increase_scores_normalize)
         token_entropy = calculate_token_entropy(token_probability)
+        result.entropy= Entropy(
+                token = token_entropy,
+                general = entropy
+            )
+        
         print(f"Attention Entropy: {entropy:.4f}")
         print(f"Token Entropy: {token_entropy:.4f}")
         cluster_entropy(db, weighted_attentions_with_locations)
+        print(result)
 
 if __name__ == "__main__":
     main()
