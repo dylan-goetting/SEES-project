@@ -35,6 +35,8 @@ HEAD_NUM = 32
 HEAD_DIM = 128
 HIDDEN_DIM = HEAD_NUM * HEAD_DIM
 
+batch_size = 1
+
 @dataclass
 class ImagePrompt:
     image_url: str
@@ -73,39 +75,30 @@ def transfer_output(model_output):
 
 
 def transfer_output(model_output):
-    """Handle different model output formats with proper dimension checking"""
     all_pos_layer_input = []
     all_pos_layer_output = []
     all_last_attn_subvalues = []
 
     for layer_i in range(LAYER_NUM):
-        layer_data = model_output[layer_i]
-        
-        # Handle different output formats
-        if len(layer_data) >= 6:  # New format
-            cur_layer_input = layer_data[0]
-            cur_layer_output = layer_data[4]
-            cur_last_attn_subvalues = layer_data[5]
-        elif len(layer_data) >= 3:  # Older format
-            cur_layer_input = layer_data[0]
-            cur_layer_output = layer_data[1]
-            cur_last_attn_subvalues = layer_data[2]
-        else:
-            raise ValueError(f"Unexpected layer output format with length {len(layer_data)}")
+        layer_tuple = model_output[layer_i]
+        cur_layer_input = layer_tuple[0]  
+        cur_layer_output = layer_tuple[4] 
+        cur_last_attn_subvalues = layer_tuple[5]  
 
-        # Convert to list and handle batch dimension
-        def process_tensor(t):
+        def _strict_original_processing(t):
             if isinstance(t, torch.Tensor):
-                if t.dim() > 1:
-                    t = t[0]  # Take first item if batched
-                return t.tolist()
-            return t
+                while t.dim() > 1: 
+                    t = t[0]
+            return t.tolist()
             
-        all_pos_layer_input.append(process_tensor(cur_layer_input))
-        all_pos_layer_output.append(process_tensor(cur_layer_output))
-        all_last_attn_subvalues.append(process_tensor(cur_last_attn_subvalues))
+        all_pos_layer_input.append(_strict_original_processing(cur_layer_input))
+        all_pos_layer_output.append(_strict_original_processing(cur_layer_output))
+        all_last_attn_subvalues.append(_strict_original_processing(cur_last_attn_subvalues))
 
     return all_pos_layer_input, all_pos_layer_output, all_last_attn_subvalues
+    
+    # For batch_size=1, return the first item's data
+    return all_pos_layer_input[0], all_pos_layer_output[0], all_last_attn_subvalues[0]
 
 def get_bsvalues(vector, model, final_var):
     vector = vector * torch.rsqrt(final_var + 1e-6)
@@ -292,7 +285,7 @@ class LlavaMechanism:
                 batch_results.append((demo_img, increase_scores_normalize, outputs_probs_sort))
                 
             return batch_results
-        
+
     def save_vis(self, demo_img, increase_scores_normalize, output_path=None):
         """
         Save a visualization of the original image with overlayed attention patches.
@@ -473,7 +466,7 @@ def main():
         image_url="http://images.cocodataset.org/val2017/000000219578.jpg",
         prompt="What is the color of the dog?",
         prefix="the color of the dog is"
-    ) for _ in range(5)
+    ) for _ in range(100)
 ]
     
     images = [Image.open(requests.get(ip.image_url, stream=True).raw) for ip in imagePrompts]
@@ -482,17 +475,15 @@ def main():
 
     batch_results = mechanism.get_attention_patches(images, prompts, prefixes)
     
-    for i, (demo_img, increase_scores_normalize, token_probability) in enumerate(batch_results):
-        prompt = prompts[i]
-        image_url = imagePrompts[i].image_url
-
-        mechanism.save_vis(demo_img, increase_scores_normalize, prompt)
-    
-        print(f"\nProcess image {i} - {imagePrompt.image_url}")
-        image = Image.open(requests.get(imagePrompt.image_url, stream=True).raw)
+    for i, (ip, (demo_img, increase_scores_normalize, token_probability)) in enumerate(zip(imagePrompts, batch_results)):
+        print(f"\nProcess image {i} - {ip.image_url}")
+        image = Image.open(requests.get(ip.image_url, stream=True).raw)
 
         # Get attention patches
-        demo_img, increase_scores_normalize, token_probability = mechanism.get_attention_patches(image, imagePrompt.prompt, imagePrompt.prefix)
+        demo_img, increase_scores_normalize, token_probability = mechanism.get_attention_patches(
+        image, ip.prompt, ip.prefix
+        )
+        mechanism.save_vis(demo_img, increase_scores_normalize, prompt)
         
         # increase_scores_normalize - min: 0.0, max: 0.1541638498880645
         # For each attention, prefix the patch row and column indices.
