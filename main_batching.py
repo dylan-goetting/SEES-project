@@ -35,7 +35,7 @@ HEAD_NUM = 32
 HEAD_DIM = 128
 HIDDEN_DIM = HEAD_NUM * HEAD_DIM
 
-batch_size = 5
+batch_size = 4 # 5 is the highest it can go without running out of CUDA memory
 
 @dataclass
 class ImagePrompt:
@@ -56,7 +56,7 @@ def normalize(vector):
     vector2 = [x/sum(vector1) for x in vector1]
     return vector2
 
-def transfer_output(model_output, current_batch_size=5):
+def transfer_output(model_output, batch_size=5):
     all_pos_layer_input = []
     all_pos_layer_output = []
     all_last_attn_subvalues = []
@@ -66,7 +66,7 @@ def transfer_output(model_output, current_batch_size=5):
         batch_outputs = []
         batch_subvalues = []
         
-        for b in range(current_batch_size):
+        for b in range(batch_size):
             layer_data = model_output[layer_i]
             cur_layer_input = layer_data[0][b] if layer_data[0].dim() > 1 else layer_data[0]
             cur_layer_output = layer_data[4][b] if layer_data[4].dim() > 1 else layer_data[4]
@@ -136,19 +136,38 @@ def plt_heatmap(data):
 
 class LlavaMechanism:
     def __init__(self, model_id="llava-hf/llava-1.5-7b-hf", device="cuda"):
+        """
+        Initialize the LlavaMechanism class by loading the model and processor.
+        
+        Args:
+            model_id (str): The model ID to load
+            device (str): Device to run the model on
+        """
+        # Setup CUDA
         torch.set_default_device('cuda')
+        
+        # Load model
         self.model = LlavaForConditionalGeneration.from_pretrained(
-            model_id, low_cpu_mem_usage=True, revision='a272c74'
+            model_id, 
+            low_cpu_mem_usage=True, 
+            revision='a272c74'
         ).to(device)
-        self.processor = AutoProcessor.from_pretrained(model_id, revision='a272c74')
-        self.processor.patch_size = 14
+        
+        print(f"Model loaded on {self.model.device}")
         self.model.eval()
+        
+        self.processor = AutoProcessor.from_pretrained(model_id, revision='a272c74')
+        self.processor.patch_size = 14 # added
+        print(f"Model loaded on {self.model.device}")
+        self.model.eval()
+        
+        # Create output directory for saved visualizations
         self.output_dir = "output_images"
         os.makedirs(self.output_dir, exist_ok=True)
 
     def get_attention_patches(self, images, prompts, prefixes):
         batch_results = []
-        current_batch_size = len(images)
+        batch_size = len(images)
         t = time.time()
         
         full_prompts = [f"USER: <image>\n{p}\nASSISTANT: {pref}" for p, pref in zip(prompts, prefixes)]
@@ -156,11 +175,12 @@ class LlavaMechanism:
 
         with torch.inference_mode():
             outputs = self.model(**inputs)
+        
         print(f'Finished inference time {time.time() - t}')
 
-        transfer_outputs = transfer_output(outputs[2], current_batch_size)
+        transfer_outputs = transfer_output(outputs[2], batch_size)
         
-        for i in range(current_batch_size):
+        for i in range(batch_size):
             all_pos_layer_input_i = [layer[i] for layer in transfer_outputs[0]]
             all_pos_layer_output_i = [layer[i] for layer in transfer_outputs[1]] 
             all_last_attn_subvalues_i = [layer[i] for layer in transfer_outputs[2]]
@@ -231,35 +251,34 @@ class LlavaMechanism:
             print(f'Finished getting patches time {time.time() - t}')
 
             batch_results.append((demo_img, increase_scores_normalize, outputs_probs_sort))
-            torch.cuda.empty_cache()
             
         return batch_results
 
-    def save_vis(self, demo_img, increase_scores_normalize, output_path=None):
-        if output_path is None:
-            output_path = os.path.join(self.output_dir, "attention_analysis.png")
-        demo_img_h, demo_img_w, demo_img_c = demo_img.shape
+    # def save_vis(self, demo_img, increase_scores_normalize, output_path=None):
+    #     if output_path is None:
+    #         output_path = os.path.join(self.output_dir, "attention_analysis.png")
+    #     demo_img_h, demo_img_w, demo_img_c = demo_img.shape
         
-        demo_img_inc = np.array(increase_scores_normalize).reshape((24, 24))
-        demo_img_inc = cv2.resize(demo_img_inc,
-                                dsize=(demo_img_w, demo_img_h),
-                                interpolation=cv2.INTER_CUBIC)
+    #     demo_img_inc = np.array(increase_scores_normalize).reshape((24, 24))
+    #     demo_img_inc = cv2.resize(demo_img_inc,
+    #                             dsize=(demo_img_w, demo_img_h),
+    #                             interpolation=cv2.INTER_CUBIC)
         
-        plt.figure(figsize=(25, 6))
-        plt.subplot(1, 3, 1)
-        plt.imshow(demo_img)
-        plt.axis("off")
-        plt.title("image")
+    #     plt.figure(figsize=(25, 6))
+    #     plt.subplot(1, 3, 1)
+    #     plt.imshow(demo_img)
+    #     plt.axis("off")
+    #     plt.title("image")
         
-        plt.subplot(1, 3, 2)
-        plt.imshow(demo_img)
-        plt.imshow(demo_img_inc, alpha=0.8, cmap="gray")
-        plt.axis("off")
-        plt.title("log increase")
+    #     plt.subplot(1, 3, 2)
+    #     plt.imshow(demo_img)
+    #     plt.imshow(demo_img_inc, alpha=0.8, cmap="gray")
+    #     plt.axis("off")
+    #     plt.title("log increase")
         
-        plt.savefig(output_path)
-        plt.close()
-        print(f"Visualization saved to {output_path}")
+    #     plt.savefig(output_path)
+    #     plt.close()
+    #     print(f"Visualization saved to {output_path}")
 
 def transform_matrix_to_3d_points(array_2d: np.ndarray):
     rows, cols = array_2d.shape    
@@ -300,49 +319,98 @@ def duplicate_points(datapoints: np.ndarray, min_dup: int, max_dup: int) -> np.n
     print(f"Original points: {len(datapoints)} -> After weighting: {len(weighted_points)}")
     return weighted_points
 
-def save_attentions(weighted_attentions_with_locations: np.ndarray, db: DBSCAN, image_url: str):
-    parsed_url = urllib.parse.urlparse(image_url)
-    filename = os.path.basename(parsed_url.path)
-    plt.scatter(weighted_attentions_with_locations[:, 0], weighted_attentions_with_locations[:, 1], c=db.labels_)
-    plt.show()
-    plt.savefig(os.path.join("output_images", "attention_analysis_" + filename))
-    plt.close()
+# def save_attentions(weighted_attentions_with_locations: np.ndarray, db: DBSCAN, image_url: str):
+#     parsed_url = urllib.parse.urlparse(image_url)
+#     filename = os.path.basename(parsed_url.path)
+#     plt.scatter(weighted_attentions_with_locations[:, 0], weighted_attentions_with_locations[:, 1], c=db.labels_)
+#     plt.show()
+#     plt.savefig(os.path.join("output_images", "attention_analysis_" + filename))
+#     plt.close()
 
-def calculate_entropy(weighted_attentions_with_locations: np.ndarray, db: DBSCAN):
-    entropy = {}
+from dataclasses import dataclass
+
+@dataclass
+class ClusterData:
+    n_points: int
+    ave_strength: float
+    
+def calculate_metrics(db: DBSCAN, weighted_attentions_with_locations):
     labels = db.labels_
-    cluster_counts = Counter(labels)
-    
-    for label, count in cluster_counts.items():
-        if label == -1:
-            print(f"Noise (unclustered): {count} points")
-        else:
-            entropy[label] = Entropy(label, count, 0.0)
+    unique_clusters = set(labels) - {-1}  # Remove noise (-1)
 
-    unique_clusters = set(labels) - {-1}
     cluster_strengths = {}
+
+    # Count the number of points per cluster
+#    cluster_counts = Counter(labels)
+
+#    print("Points per cluster:")
+#    for label, count in cluster_counts.items():
+#        if label != -1:
+#            cluster_strengths[label] = ClusterData(count, 0)
+
+    # 
     z_values = weighted_attentions_with_locations[:, 2]
-    
+
     for cluster in unique_clusters:
-        cluster_points = z_values[labels == cluster]
-        cluster_strengths[cluster] = np.mean(cluster_points)
+        cluster_points = z_values[labels == cluster]  # Get strength values for the cluster
+
+        if cluster in cluster_strengths:
+            cluster_strengths[cluster].ave_strength = np.mean(cluster_points)
+        else:
+            cluster_strengths[cluster] = ClusterData(0, np.mean(cluster_points))
+
+    # Print average strength of each cluster
+    print("Average Strength and Number of Points per Cluster:")
+    for cluster, data in cluster_strengths.items():
+        print(f"Cluster {cluster}: {data}")
+        
+    return cluster_strengths
+
+def calculate_entropy(datapoints: list):
+    flat_list = [item for sublist in datapoints for item in sublist]
+    total_count = len(flat_list)
+    counts = Counter(flat_list)
+    probabilities = [count / total_count for count in counts.values()]
+    entropy = -sum(p * np.log2(p) for p in probabilities if p > 0)
+    max_entropy = np.log2(len(counts))
+    normalized_entropy = entropy / max_entropy
+    return normalized_entropy
+
+def cluster_entropy(db:DBSCAN, weighted_attentions_with_locations):
+    labels = db.labels_
+    unique_clusters = set(labels) - {-1}  # Remove noise (-1)
+
+    cluster_strengths = {}
     
-    for cluster, avg_strength in cluster_strengths.items():
-        entropy[cluster].average_strength = avg_strength
+    z_values = weighted_attentions_with_locations[:, 2]
 
-    return entropy
+    for cluster in unique_clusters:
+        cluster_points = z_values[labels == cluster]  # Get strength values for the cluster
+        
+        if cluster in cluster_strengths:
+            total_count = len(cluster_points)
+            counts = Counter(cluster_points)
+            probabilities = [count / total_count for count in counts.values()]
+            entropy = -sum(p * np.log2(p) for p in probabilities if p > 0)
+            max_entropy = np.log2(len(counts))
+            normalized_entropy = entropy / max_entropy
+            cluster_strengths[cluster].ave_strength = normalized_entropy
 
-def calculate_token_entropy(token_probability):
-    # [Your original implementation here]
-    pass
+    # Print average strength of each cluster
+    print("Entropy per Cluster:")
+    for cluster, data in cluster_strengths.items():
+        print(f"Cluster {cluster}: {data}")
+        
+    return cluster_strengths
 
-def cluster_entropy(db, weighted_attentions_with_locations):
-    # [Your original implementation here]
-    pass
-
-def calculate_metrics(db, weighted_attentions_with_locations):
-    # [Your original implementation here]
-    pass
+def calculate_token_entropy(token_list: list):
+    total_count = len(token_list)
+    counts = Counter(token_list)
+    probabilities = [count / total_count for count in counts.values()]
+    entropy = -sum(p * np.log2(p) for p in probabilities if p > 0)
+    max_entropy = np.log2(len(counts))
+    normalized_entropy = entropy / max_entropy
+    return normalized_entropy
 
 def main():
     """
@@ -359,7 +427,8 @@ def main():
             prefix="the color of the dog is"
         ) for _ in range(100)
     ]
-    
+
+    print("Processing images...")
     # Process images in batches
     for i in range(0, len(imagePrompts), batch_size):
         chunk = imagePrompts[i:i + batch_size]
@@ -392,37 +461,19 @@ def main():
             
             # Find clusters
             db, n_clusters, n_noise = find_clusters(weighted_attentions_with_locations, 1.3, 15)
-            
-            # Calculate metrics and entropy
-            entropy = calculate_entropy(weighted_attentions_with_locations, db)
-            
-            # Calculate token entropy
-            outputs_probs = get_prob(outputs_probs_sort)
-            token_entropy = -torch.sum(outputs_probs * torch.log2(outputs_probs + 1e-10)).item()
-            
-            # Print cluster statistics
-            print("Average Strength and Number of Points per Cluster:")
-            for cluster, data in entropy.items():
-                if cluster != -1:  # Skip noise
-                    print(f"Cluster {cluster}: ClusterData(n_points={data.count_points}, ave_strength={data.average_strength})")
-            
-            # Calculate and print attention entropy
-            total_strength = sum(e.average_strength for e in entropy.values() if e.cluster != -1)
-            attention_entropy = 0.0
-            for cluster_data in entropy.values():
-                if cluster_data.cluster != -1 and cluster_data.average_strength > 0:
-                    p = cluster_data.average_strength / total_strength
-                    attention_entropy -= p * math.log(p) if p > 0 else 0
-            
-            print(f"Attention Entropy: {attention_entropy:.4f}")
+
+            # Apply Euclidean distance to evaluate spatial proximity
+            # epsilon = 1.5 - eps should be >=1 since the minimum distance between 2 adjacent attentions is 1.
+            # min_samples = 15
+            db, _, _ = find_clusters(weighted_attentions_with_locations, 1.3, 15)
+            calculate_metrics(db, weighted_attentions_with_locations)
+    
+            # Calculate entropy.
+            entropy = calculate_entropy(increase_scores_normalize)
+            token_entropy = calculate_token_entropy(outputs_probs_sort)
+            print(f"Attention Entropy: {entropy:.4f}")
             print(f"Token Entropy: {token_entropy:.4f}")
-            
-            # Print entropy per cluster
-            print("Entropy per Cluster:")
-            for cluster, data in entropy.items():
-                if cluster != -1 and data.average_strength > 0:
-                    cluster_entropy = -math.log(data.average_strength / total_strength)
-                    print(f"Cluster {cluster}: {cluster_entropy:.4f}")
+            cluster_entropy(db, weighted_attentions_with_locations)
 
 if __name__ == "__main__":
     main()
